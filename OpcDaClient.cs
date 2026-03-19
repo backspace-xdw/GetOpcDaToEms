@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using OPCAutomation;
 
 namespace OpcDaClient
@@ -13,6 +14,12 @@ namespace OpcDaClient
 
         public bool IsConnected { get; private set; }
 
+        /// <summary>连接的 ProgID（重连用）</summary>
+        public string ServerProgId { get; private set; }
+
+        /// <summary>连接的主机（重连用）</summary>
+        public string Host { get; private set; }
+
         public OpcDaClient()
         {
             _activePollingReaders = new List<PollingReader>();
@@ -20,23 +27,59 @@ namespace OpcDaClient
 
         public void Connect(string serverProgId, string host = "localhost")
         {
-            try
+            Connect(serverProgId, host, 3, 3000);
+        }
+
+        /// <summary>
+        /// 连接 OPC 服务器（带重试）
+        /// </summary>
+        public void Connect(string serverProgId, string host, int retryCount, int retryDelayMs)
+        {
+            ServerProgId = serverProgId;
+            Host = host;
+
+            Exception lastEx = null;
+
+            for (int attempt = 1; attempt <= retryCount; attempt++)
             {
-                _opcServer = new OPCServer();
-                _opcServer.Connect(serverProgId, host);
-                IsConnected = true;
+                try
+                {
+                    if (_opcServer != null)
+                    {
+                        try { Marshal.ReleaseComObject(_opcServer); } catch { }
+                    }
+
+                    _opcServer = new OPCServer();
+                    _opcServer.Connect(serverProgId, host);
+                    IsConnected = true;
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    lastEx = ex;
+                    if (attempt < retryCount)
+                    {
+                        Thread.Sleep(retryDelayMs);
+                    }
+                }
             }
-            catch (Exception ex)
-            {
-                throw new Exception("连接 OPC 服务器失败: " + ex.Message, ex);
-            }
+
+            throw new Exception("连接 OPC 服务器失败 (重试 " + retryCount + " 次): " + lastEx.Message, lastEx);
+        }
+
+        /// <summary>
+        /// 重新连接（断线重连用）
+        /// </summary>
+        public void Reconnect(int retryCount = 3, int retryDelayMs = 3000)
+        {
+            try { Disconnect(); } catch { }
+            Connect(ServerProgId, Host, retryCount, retryDelayMs);
         }
 
         public void Disconnect()
         {
             if (_opcServer != null && IsConnected)
             {
-                // 停止所有轮询读取器
                 foreach (var reader in _activePollingReaders.ToArray())
                 {
                     try { reader.Stop(); } catch { }

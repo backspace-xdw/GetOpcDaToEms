@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace OpcDaClient
 {
     /// <summary>
     /// OPC → EMS 数据转发器
-    /// 自动连接 → 自动浏览点位 → 自动轮询 → 自动转发
+    /// 自动连接（带重试）→ 自动浏览 → 自动轮询 → 自动转发
+    /// 轮询中断线自动重连
     /// </summary>
     public class DataForwarder : IDisposable
     {
@@ -14,7 +16,6 @@ namespace OpcDaClient
         private IPollingReader _reader;
         private bool _disposed;
 
-        // OpcItemId -> PointMapping
         private Dictionary<string, PointMapping> _mappingDict;
 
         private int _totalForwarded;
@@ -23,7 +24,6 @@ namespace OpcDaClient
         public bool IsRunning { get; private set; }
         public int TotalForwarded { get { return _totalForwarded; } }
         public int TotalErrors { get { return _totalErrors; } }
-        public int PointCount { get { return _mappingDict != null ? _mappingDict.Count : 0; } }
 
         public event EventHandler<ForwarderLogEventArgs> Log;
 
@@ -32,9 +32,6 @@ namespace OpcDaClient
             _config = config;
         }
 
-        /// <summary>
-        /// 启动：连接 → 浏览 → 轮询 → 转发
-        /// </summary>
         public void Start()
         {
             if (IsRunning) return;
@@ -43,21 +40,41 @@ namespace OpcDaClient
             OnLog("OPC → EMS 数据转发器启动");
             OnLog("========================================");
 
-            // 1. 连接 OPC 服务器
-            OnLog("连接 OPC: " + _config.ServerProgId + "@" + _config.Host);
+            // 1. 连接 OPC 服务器（带重试）
+            OnLog("连接 OPC: " + _config.ServerProgId + "@" + _config.Host +
+                  " (最多重试 " + _config.RetryCount + " 次, 间隔 " + _config.RetryDelayMs + "ms)");
             _client = new OpcDaClient();
-            _client.Connect(_config.ServerProgId, _config.Host);
-            OnLog("OPC 连接成功");
+
+            for (int attempt = 1; attempt <= _config.RetryCount; attempt++)
+            {
+                try
+                {
+                    _client.Connect(_config.ServerProgId, _config.Host, 1, 0);
+                    OnLog("OPC 连接成功");
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    OnLog("[第 " + attempt + "/" + _config.RetryCount + " 次] 连接失败: " + ex.Message);
+                    if (attempt >= _config.RetryCount)
+                    {
+                        OnLog("[错误] 连接重试耗尽，退出");
+                        _client.Dispose();
+                        _client = null;
+                        return;
+                    }
+                    OnLog("等待 " + _config.RetryDelayMs + "ms 后重试...");
+                    Thread.Sleep(_config.RetryDelayMs);
+                }
+            }
 
             // 2. 确定点位列表
             if (_config.Points.Count > 0)
             {
-                // 配置文件中已指定点位，直接使用
                 OnLog("使用配置文件中的 " + _config.Points.Count + " 个点位");
             }
             else
             {
-                // 自动浏览 OPC 服务器，发现所有点位
                 OnLog("自动浏览 OPC 服务器...");
                 AutoDiscoverPoints();
                 OnLog("发现 " + _config.Points.Count + " 个点位");
@@ -87,17 +104,16 @@ namespace OpcDaClient
             {
                 try
                 {
-                    int emsId;
                     switch (p.DataType)
                     {
                         case EmsDataType.Dx:
-                            emsId = EmsPlus.GetDxId(p.EmsTagName, p.EmsSrvNo);
+                            EmsPlus.GetDxId(p.EmsTagName, p.EmsSrvNo);
                             break;
                         case EmsDataType.Cx:
-                            emsId = EmsPlus.GetCxId(p.EmsTagName, p.EmsSrvNo);
+                            EmsPlus.GetCxId(p.EmsTagName, p.EmsSrvNo);
                             break;
                         default:
-                            emsId = EmsPlus.GetAxId(p.EmsTagName, p.EmsSrvNo);
+                            EmsPlus.GetAxId(p.EmsTagName, p.EmsSrvNo);
                             break;
                     }
                     ok++;
@@ -110,15 +126,7 @@ namespace OpcDaClient
             OnLog("EMS ID: " + ok + " 成功, " + fail + " 失败");
 
             // 4. 启动轮询
-            var readConfig = _config.GetReadConfig();
-            var opcItemIds = _config.GetOpcItemIds();
-
-            OnLog("启动轮询: " + opcItemIds.Length + " 项, 间隔 " + _config.PollingIntervalMs + "ms");
-
-            _reader = _client.CreatePollingReader(opcItemIds, readConfig, _config.PollingIntervalMs);
-            _reader.DataReceived += OnDataReceived;
-            _reader.ErrorOccurred += OnPollingError;
-            _reader.Start();
+            StartPolling();
 
             IsRunning = true;
             _totalForwarded = 0;
@@ -128,20 +136,27 @@ namespace OpcDaClient
             OnLog("----------------------------------------");
         }
 
-        /// <summary>
-        /// 自动浏览 OPC 服务器所有点位，生成映射
-        /// OPC ItemId 直接作为 EMS 点名，默认 Ax 类型
-        /// </summary>
+        private void StartPolling()
+        {
+            var readConfig = _config.GetReadConfig();
+            var opcItemIds = _config.GetOpcItemIds();
+
+            OnLog("启动轮询: " + opcItemIds.Length + " 项, 间隔 " + _config.PollingIntervalMs + "ms");
+
+            _reader = _client.CreatePollingReader(opcItemIds, readConfig, _config.PollingIntervalMs);
+            _reader.DataReceived += OnDataReceived;
+            _reader.ErrorOccurred += OnPollingError;
+            _reader.Start();
+        }
+
         private void AutoDiscoverPoints()
         {
             _config.Points.Clear();
 
-            // 先获取所有分支
             var branches = _client.BrowseServer();
 
             if (branches.Count == 0)
             {
-                // 无分支，直接浏览根节点
                 var items = _client.BrowseItems("");
                 foreach (var item in items)
                 {
@@ -156,7 +171,6 @@ namespace OpcDaClient
             }
             else
             {
-                // 遍历每个分支
                 foreach (var branch in branches)
                 {
                     try
@@ -180,6 +194,49 @@ namespace OpcDaClient
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// 断线重连
+        /// </summary>
+        private void TryReconnect()
+        {
+            OnLog("[重连] 尝试重新连接 OPC 服务器...");
+
+            // 清理旧轮询器
+            if (_reader != null)
+            {
+                _reader.DataReceived -= OnDataReceived;
+                _reader.ErrorOccurred -= OnPollingError;
+                try { _reader.Stop(); } catch { }
+                try { _reader.Dispose(); } catch { }
+                _reader = null;
+            }
+
+            for (int attempt = 1; attempt <= _config.RetryCount; attempt++)
+            {
+                try
+                {
+                    _client.Reconnect(1, 0);
+                    OnLog("[重连] 第 " + attempt + " 次重连成功");
+
+                    // 重新启动轮询
+                    StartPolling();
+                    OnLog("[重连] 轮询已恢复");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    OnLog("[重连] 第 " + attempt + "/" + _config.RetryCount + " 次失败: " + ex.Message);
+                    if (attempt < _config.RetryCount)
+                    {
+                        Thread.Sleep(_config.RetryDelayMs);
+                    }
+                }
+            }
+
+            OnLog("[重连] 重连耗尽，停止转发");
+            IsRunning = false;
         }
 
         public void Stop()
@@ -210,9 +267,6 @@ namespace OpcDaClient
             OnLog("========================================");
         }
 
-        /// <summary>
-        /// 数据到达 → 转发到 EMS
-        /// </summary>
         private void OnDataReceived(object sender, PollingDataEventArgs e)
         {
             int forwarded = 0;
@@ -264,10 +318,12 @@ namespace OpcDaClient
         private void OnPollingError(object sender, PollingErrorEventArgs e)
         {
             OnLog("[轮询错误] " + e.Exception.Message + " (第 " + e.ConsecutiveErrors + " 次)");
-            if (e.ConsecutiveErrors >= 10)
+
+            // 连续错误达到阈值，尝试重连而不是直接退出
+            if (e.ConsecutiveErrors >= 5)
             {
-                OnLog("[自动停止] 连续错误超过 10 次");
-                IsRunning = false;
+                OnLog("[轮询中断] 连续 5 次错误，触发重连...");
+                TryReconnect();
             }
         }
 

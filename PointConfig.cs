@@ -29,6 +29,10 @@ namespace OpcDaClient
         public OpcDataSource DataSource { get; set; } = OpcDataSource.Cache;
         public int AsyncTimeoutMs { get; set; } = 5000;
 
+        // 连接重试
+        public int RetryCount { get; set; } = 5;
+        public int RetryDelayMs { get; set; } = 3000;
+
         public List<PointMapping> Points { get; set; } = new List<PointMapping>();
 
         public string[] GetOpcItemIds()
@@ -148,6 +152,16 @@ namespace OpcDaClient
                     if (int.TryParse(value, out timeout))
                         config.AsyncTimeoutMs = timeout;
                     break;
+                case "retrycount":
+                    int rc;
+                    if (int.TryParse(value, out rc))
+                        config.RetryCount = rc;
+                    break;
+                case "retrydelayms":
+                    int rd;
+                    if (int.TryParse(value, out rd))
+                        config.RetryDelayMs = rd;
+                    break;
             }
         }
 
@@ -194,6 +208,9 @@ HostName=192.168.1.100
 [Polling]
 IntervalMs=1000
 ReadMode=SyncCache
+# 连接失败重试次数和间隔（毫秒）
+RetryCount=5
+RetryDelayMs=3000
 
 # [Points] 留空 = 自动浏览OPC服务器所有点位
 # 如需指定部分点位: OPC点位ID | EMS点名 | 类型(Ax/Dx/Cx) | 服务号
