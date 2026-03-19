@@ -106,9 +106,39 @@ namespace OpcDaClient
         private void InitGroup()
         {
             _groupName = "Polling_" + Guid.NewGuid().ToString("N").Substring(0, 8);
-            _group = _opcServer.OPCGroups.Add(_groupName);
-            _group.IsActive = true;
-            _group.IsSubscribed = false;
+
+            // 关键：创建组之前设为不激活，避免触发 IDataObject::DAdvise 回调
+            // 对方服务器不支持回调会导致 RPC 不可用
+            _opcServer.OPCGroups.DefaultGroupIsActive = false;
+
+            try
+            {
+                _group = _opcServer.OPCGroups.Add(_groupName);
+            }
+            catch (Exception ex)
+            {
+                // 即使 DAdvise 报错，组可能已创建成功，尝试继续
+                if (ex.Message.Contains("RPC") || ex.Message.Contains("DAdvise"))
+                {
+                    // 尝试获取已创建的组
+                    try
+                    {
+                        _group = _opcServer.OPCGroups.GetOPCGroup(_groupName);
+                    }
+                    catch
+                    {
+                        throw new Exception("创建 OPC 组失败: " + ex.Message, ex);
+                    }
+                }
+                else
+                {
+                    throw;
+                }
+            }
+
+            // 确保不激活、不订阅（纯同步读取不需要）
+            try { _group.IsActive = false; } catch { }
+            try { _group.IsSubscribed = false; } catch { }
 
             var opcItems = _group.OPCItems;
             var serverHandles = new int[_itemIds.Length];
@@ -192,8 +222,9 @@ namespace OpcDaClient
             object qualities;
             object timeStamps;
 
+            // 组未激活状态下 Cache 无数据，强制从 Device 读取
             _group.SyncRead(
-                (short)_config.DataSource,
+                (short)OpcDataSource.Device,
                 _itemIds.Length,
                 ref handleArray,
                 out values,
