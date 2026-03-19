@@ -1,66 +1,114 @@
 @echo off
-echo === Building OPC DA Client ===
+chcp 65001 >nul 2>&1
+echo === OPC DA Client 构建脚本 (Win7 32位兼容) ===
 echo.
 
-REM Check for Visual Studio 2019 MSBuild
+REM 查找 MSBuild（兼容 32位/64位 Windows）
 set "MSBUILD_PATH="
-set "VS2019_PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\2019"
 
-REM Try different VS2019 editions
-for %%E in (Enterprise Professional Community BuildTools) do (
-    if exist "%VS2019_PATH%\%%E\MSBuild\Current\Bin\MSBuild.exe" (
-        set "MSBUILD_PATH=%VS2019_PATH%\%%E\MSBuild\Current\Bin\MSBuild.exe"
-        echo Found MSBuild in VS2019 %%E
-        goto :found
+REM === 优先查找 VS 2019 ===
+REM 32位 Windows: ProgramFiles 直接就是 32位路径
+REM 64位 Windows: ProgramFiles(x86) 是 32位路径
+if defined ProgramFiles(x86) (
+    set "VS_ROOT=%ProgramFiles(x86)%\Microsoft Visual Studio"
+) else (
+    set "VS_ROOT=%ProgramFiles%\Microsoft Visual Studio"
+)
+
+for %%V in (2019 2017) do (
+    for %%E in (Enterprise Professional Community BuildTools) do (
+        if exist "%VS_ROOT%\%%V\%%E\MSBuild\Current\Bin\MSBuild.exe" (
+            set "MSBUILD_PATH=%VS_ROOT%\%%V\%%E\MSBuild\Current\Bin\MSBuild.exe"
+            echo 找到 MSBuild: VS %%V %%E
+            goto :found
+        )
+        REM VS 2017 的 MSBuild 路径不同
+        if exist "%VS_ROOT%\%%V\%%E\MSBuild\15.0\Bin\MSBuild.exe" (
+            set "MSBUILD_PATH=%VS_ROOT%\%%V\%%E\MSBuild\15.0\Bin\MSBuild.exe"
+            echo 找到 MSBuild: VS %%V %%E
+            goto :found
+        )
     )
 )
 
-REM Try MSBuild from .NET Framework
-if exist "%ProgramFiles(x86)%\MSBuild\14.0\Bin\MSBuild.exe" (
-    set "MSBUILD_PATH=%ProgramFiles(x86)%\MSBuild\14.0\Bin\MSBuild.exe"
-    echo Found MSBuild in .NET Framework
+REM === 回退: MSBuild 14.0 (VS 2015) ===
+if defined ProgramFiles(x86) (
+    set "MSBUILD14=%ProgramFiles(x86)%\MSBuild\14.0\Bin\MSBuild.exe"
+) else (
+    set "MSBUILD14=%ProgramFiles%\MSBuild\14.0\Bin\MSBuild.exe"
+)
+if exist "%MSBUILD14%" (
+    set "MSBUILD_PATH=%MSBUILD14%"
+    echo 找到 MSBuild 14.0 (VS 2015)
     goto :found
 )
 
-echo ERROR: MSBuild not found!
-echo Please install Visual Studio 2019 or Build Tools for Visual Studio
+REM === 最终回退: .NET Framework 自带 MSBuild ===
+set "NETFX_MSBUILD=%SystemRoot%\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe"
+if exist "%NETFX_MSBUILD%" (
+    set "MSBUILD_PATH=%NETFX_MSBUILD%"
+    echo 找到 .NET Framework MSBuild
+    echo 注意: .NET Framework MSBuild 可能不支持 SDK 风格项目
+    echo 建议安装 Visual Studio 2017 或更高版本
+    goto :found
+)
+
+echo 错误: 未找到 MSBuild!
+echo 请安装以下任意一项:
+echo   - Visual Studio 2019 (推荐, 最后支持 Win7 的版本)
+echo   - Visual Studio 2017
+echo   - Build Tools for Visual Studio
 pause
 exit /b 1
 
 :found
-echo Using MSBuild: %MSBUILD_PATH%
+echo 使用: %MSBUILD_PATH%
 echo.
 
-REM Restore NuGet packages
-echo Restoring NuGet packages...
-nuget restore OpcDaClient.sln 2>nul
+REM 检查 .NET Framework 版本
+echo 检查 .NET Framework...
+reg query "HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" /v Release >nul 2>&1
 if errorlevel 1 (
-    echo Warning: NuGet restore failed. Continuing anyway...
+    echo 警告: 未检测到 .NET Framework 4.5+
+    echo 请安装 .NET Framework 4.5.2 或更高版本
+    echo 下载地址: https://dotnet.microsoft.com/download/dotnet-framework
+    pause
+    exit /b 1
+)
+echo .NET Framework 4.5+ 已安装
+
+REM 检查 OPC Core Components
+echo 检查 OPC Core Components...
+reg query "HKCR\CLSID\{28E68F91-8D75-11D1-8DC3-3C302A000000}" >nul 2>&1
+if errorlevel 1 (
+    echo 警告: 未检测到 OPC Core Components
+    echo 请安装 OPC Core Components (x86 版本)
+    echo.
+) else (
+    echo OPC Core Components 已安装
 )
 
 echo.
-echo Building Debug configuration...
-"%MSBUILD_PATH%" OpcDaClient.sln /p:Configuration=Debug /p:Platform=x86 /v:minimal
+echo 开始构建 Release 版本...
+"%MSBUILD_PATH%" OpcDaClient.sln /p:Configuration=Release /p:Platform=x86 /v:minimal /restore
 if errorlevel 1 (
-    echo ERROR: Debug build failed!
+    echo.
+    echo 构建失败! 常见原因:
+    echo   1. 未安装 OPC Core Components (x86)
+    echo   2. MSBuild 版本过低 (需要 VS 2017+)
+    echo   3. .NET Framework 4.5.2 未安装
     pause
     exit /b 1
 )
 
 echo.
-echo Building Release configuration...
-"%MSBUILD_PATH%" OpcDaClient.sln /p:Configuration=Release /p:Platform=x86 /v:minimal
-if errorlevel 1 (
-    echo ERROR: Release build failed!
-    pause
-    exit /b 1
-)
-
+echo === 构建成功! ===
 echo.
-echo === Build completed successfully! ===
+echo 输出文件: bin\x86\Release\OpcDaClient.exe
 echo.
-echo Output files:
-echo Debug:   bin\x86\Debug\OpcDaClient.exe
-echo Release: bin\x86\Release\OpcDaClient.exe
+echo 运行前请确保:
+echo   1. 已安装 OPC Core Components (x86)
+echo   2. 至少安装一个 OPC DA 服务器
+echo   3. 以管理员身份运行 OpcDaClient.exe
 echo.
 pause
