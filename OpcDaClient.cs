@@ -16,55 +16,23 @@ namespace OpcDaClient
         public string ServerProgId { get; private set; }
         public string Host { get; private set; }
 
-        #region DCOM 安全设置
+        #region DCOM 安全
 
         [DllImport("ole32.dll")]
         private static extern int CoSetProxyBlanket(
             [MarshalAs(UnmanagedType.IUnknown)] object pProxy,
-            uint dwAuthnSvc,
-            uint dwAuthzSvc,
-            IntPtr pServerPrincName,
-            uint dwAuthnLevel,
-            uint dwImpLevel,
-            IntPtr pAuthInfo,
-            uint dwCapabilities);
+            uint dwAuthnSvc, uint dwAuthzSvc, IntPtr pServerPrincName,
+            uint dwAuthnLevel, uint dwImpLevel,
+            IntPtr pAuthInfo, uint dwCapabilities);
 
-        private const uint RPC_C_AUTHN_WINNT = 10;
-        private const uint RPC_C_AUTHZ_NONE = 0;
-        private const uint RPC_C_AUTHN_LEVEL_NONE = 1;
-        private const uint RPC_C_AUTHN_LEVEL_CONNECT = 2;
-        private const uint RPC_C_IMP_LEVEL_IMPERSONATE = 3;
-        private const uint EOAC_NONE = 0;
-
-        /// <summary>
-        /// 对 COM 对象设置 DCOM 代理安全（解决远程连接 RPC 不可用）
-        /// </summary>
         private static void SetProxySecurity(object comObject)
         {
-            // 先尝试 AUTHN_LEVEL_NONE（最宽松）
-            int hr = CoSetProxyBlanket(
-                comObject,
-                RPC_C_AUTHN_WINNT,
-                RPC_C_AUTHZ_NONE,
-                IntPtr.Zero,
-                RPC_C_AUTHN_LEVEL_NONE,
-                RPC_C_IMP_LEVEL_IMPERSONATE,
-                IntPtr.Zero,
-                EOAC_NONE);
-
-            if (hr != 0)
+            try
             {
-                // 回退到 AUTHN_LEVEL_CONNECT
-                CoSetProxyBlanket(
-                    comObject,
-                    RPC_C_AUTHN_WINNT,
-                    RPC_C_AUTHZ_NONE,
-                    IntPtr.Zero,
-                    RPC_C_AUTHN_LEVEL_CONNECT,
-                    RPC_C_IMP_LEVEL_IMPERSONATE,
-                    IntPtr.Zero,
-                    EOAC_NONE);
+                CoSetProxyBlanket(comObject,
+                    10, 0, IntPtr.Zero, 1, 3, IntPtr.Zero, 0);
             }
+            catch { }
         }
 
         #endregion
@@ -76,7 +44,7 @@ namespace OpcDaClient
 
         public void Connect(string serverProgId, string host = "localhost")
         {
-            Connect(serverProgId, host, 3, 3000);
+            Connect(serverProgId, host, 5, 3000);
         }
 
         public void Connect(string serverProgId, string host, int retryCount, int retryDelayMs)
@@ -84,13 +52,17 @@ namespace OpcDaClient
             ServerProgId = serverProgId;
             Host = host;
 
+            // 第一步：通过 OpcEnum 预热远程 DCOM 通道
+            // 通用 OPC 客户端都这么做，这一步建立 DCOM 连接
+            WarmUpDcom(host, retryCount, retryDelayMs);
+
+            // 第二步：连接目标 OPC 服务器
             Exception lastEx = null;
 
             for (int attempt = 1; attempt <= retryCount; attempt++)
             {
                 try
                 {
-                    // 每次重试都完全释放旧对象
                     if (_opcServer != null)
                     {
                         try { _opcServer.Disconnect(); } catch { }
@@ -98,13 +70,8 @@ namespace OpcDaClient
                         _opcServer = null;
                     }
 
-                    // 创建新的 COM 对象
                     _opcServer = new OPCServer();
-
-                    // 关键：设置 DCOM 代理安全（必须在 Connect 之前）
                     SetProxySecurity(_opcServer);
-
-                    // 连接
                     _opcServer.Connect(serverProgId, host);
                     IsConnected = true;
                     return;
@@ -113,20 +80,59 @@ namespace OpcDaClient
                 {
                     lastEx = ex;
                     if (attempt < retryCount)
-                    {
                         Thread.Sleep(retryDelayMs);
-                    }
                 }
             }
 
             throw new Exception("连接 OPC 服务器失败 (重试 " + retryCount + " 次): " + lastEx.Message, lastEx);
         }
 
-        public void Reconnect(int retryCount = 3, int retryDelayMs = 3000)
+        /// <summary>
+        /// 通过 OpcEnum 预热远程机器的 DCOM 通道
+        /// 通用 OPC 客户端在连接前都先做这一步
+        /// 失败不抛异常——预热是尽力而为
+        /// </summary>
+        private void WarmUpDcom(string host, int retryCount, int retryDelayMs)
+        {
+            if (host == "localhost" || host == "127.0.0.1" || host == "")
+                return;
+
+            // 尝试通过 OpcEnum（OPC.ServerList）建立 DCOM 通道
+            for (int i = 0; i < retryCount; i++)
+            {
+                try
+                {
+                    Type enumType = Type.GetTypeFromProgID("OPC.ServerList.1", host, false);
+                    if (enumType == null)
+                        enumType = Type.GetTypeFromProgID("OPC.ServerList", host, false);
+
+                    if (enumType != null)
+                    {
+                        object enumObj = Activator.CreateInstance(enumType);
+                        if (enumObj != null)
+                        {
+                            SetProxySecurity(enumObj);
+                            Marshal.FinalReleaseComObject(enumObj);
+                        }
+                        return; // DCOM 通道已建立
+                    }
+                }
+                catch
+                {
+                    // RPC 不可用——等待后重试，DCOM 服务可能还在启动
+                }
+
+                if (i < retryCount - 1)
+                    Thread.Sleep(retryDelayMs);
+            }
+
+            // 预热失败也继续，后面 Connect 自己还会重试
+        }
+
+        public void Reconnect(int retryCount = 5, int retryDelayMs = 3000)
         {
             IsConnected = false;
 
-            // 清理旧连接
             if (_opcServer != null)
             {
                 try { _opcServer.Disconnect(); } catch { }

@@ -41,31 +41,22 @@ namespace OpcDaClient
             OnLog("========================================");
 
             // 1. 连接 OPC 服务器（带重试）
-            OnLog("连接 OPC: " + _config.ServerProgId + "@" + _config.Host +
-                  " (最多重试 " + _config.RetryCount + " 次, 间隔 " + _config.RetryDelayMs + "ms)");
+            OnLog("连接 OPC: " + _config.ServerProgId + "@" + _config.Host);
+            OnLog("预热 DCOM 通道 + 连接 (重试 " + _config.RetryCount + " 次, 间隔 " + _config.RetryDelayMs + "ms)");
             _client = new OpcDaClient();
 
-            for (int attempt = 1; attempt <= _config.RetryCount; attempt++)
+            try
             {
-                try
-                {
-                    _client.Connect(_config.ServerProgId, _config.Host, 1, 0);
-                    OnLog("OPC 连接成功");
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    OnLog("[第 " + attempt + "/" + _config.RetryCount + " 次] 连接失败: " + ex.Message);
-                    if (attempt >= _config.RetryCount)
-                    {
-                        OnLog("[错误] 连接重试耗尽，退出");
-                        _client.Dispose();
-                        _client = null;
-                        return;
-                    }
-                    OnLog("等待 " + _config.RetryDelayMs + "ms 后重试...");
-                    Thread.Sleep(_config.RetryDelayMs);
-                }
+                _client.Connect(_config.ServerProgId, _config.Host,
+                    _config.RetryCount, _config.RetryDelayMs);
+                OnLog("OPC 连接成功");
+            }
+            catch (Exception ex)
+            {
+                OnLog("[错误] 连接失败: " + ex.Message);
+                _client.Dispose();
+                _client = null;
+                return;
             }
 
             // 2. 确定点位列表
