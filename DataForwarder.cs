@@ -107,13 +107,13 @@ namespace OpcDaClient
                     switch (p.DataType)
                     {
                         case EmsDataType.Dx:
-                            EmsPlus.GetDxId(p.EmsTagName, p.EmsSrvNo);
+                            EmsPlus.GetDxId(p.EmsTagName);
                             break;
                         case EmsDataType.Cx:
-                            EmsPlus.GetCxId(p.EmsTagName, p.EmsSrvNo);
+                            EmsPlus.GetCxId(p.EmsTagName);
                             break;
                         default:
-                            EmsPlus.GetAxId(p.EmsTagName, p.EmsSrvNo);
+                            EmsPlus.GetAxId(p.EmsTagName);
                             break;
                     }
                     ok++;
@@ -164,8 +164,7 @@ namespace OpcDaClient
                     {
                         OpcItemId = item.ItemId,
                         EmsTagName = item.ItemId,
-                        DataType = EmsDataType.Ax,
-                        EmsSrvNo = 0
+                        DataType = EmsDataType.Ax
                     });
                 }
             }
@@ -184,7 +183,7 @@ namespace OpcDaClient
                                 OpcItemId = item.ItemId,
                                 EmsTagName = item.ItemId,
                                 DataType = EmsDataType.Ax,
-                                EmsSrvNo = 0
+                                DataType = EmsDataType.Ax
                             });
                         }
                     }
@@ -287,15 +286,15 @@ namespace OpcDaClient
                     {
                         case EmsDataType.Ax:
                             EmsPlus.WriteAnalog(mapping.EmsTagName,
-                                Convert.ToSingle(kvp.Value.Value), mapping.EmsSrvNo);
+                                Convert.ToSingle(kvp.Value.Value));
                             break;
                         case EmsDataType.Dx:
                             EmsPlus.WriteDigital(mapping.EmsTagName,
-                                Convert.ToBoolean(kvp.Value.Value), mapping.EmsSrvNo);
+                                Convert.ToBoolean(kvp.Value.Value));
                             break;
                         case EmsDataType.Cx:
                             EmsPlus.WriteString(mapping.EmsTagName,
-                                Convert.ToString(kvp.Value.Value), 0, mapping.EmsSrvNo);
+                                Convert.ToString(kvp.Value.Value));
                             break;
                     }
                     forwarded++;

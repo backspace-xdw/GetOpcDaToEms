@@ -16,7 +16,6 @@ namespace OpcDaClient
         public string OpcItemId { get; set; }
         public string EmsTagName { get; set; }
         public EmsDataType DataType { get; set; }
-        public int EmsSrvNo { get; set; }
     }
 
     public class ForwarderConfig
@@ -179,16 +178,11 @@ namespace OpcDaClient
                 default: dataType = EmsDataType.Ax; break;
             }
 
-            int srvNo = 0;
-            if (parts.Length >= 4)
-                int.TryParse(parts[3].Trim(), out srvNo);
-
             return new PointMapping
             {
                 OpcItemId = parts[0].Trim(),
                 EmsTagName = parts[1].Trim(),
-                DataType = dataType,
-                EmsSrvNo = srvNo
+                DataType = dataType
             };
         }
 
@@ -213,7 +207,7 @@ RetryCount=5
 RetryDelayMs=3000
 
 # [Points] 留空 = 自动浏览OPC服务器所有点位
-# 如需指定部分点位: OPC点位ID | EMS点名 | 类型(Ax/Dx/Cx) | 服务号
+# 如需指定部分点位: OPC点位ID | EMS点名 | 类型(Ax/Dx/Cx)
 [Points]
 ");
         }
