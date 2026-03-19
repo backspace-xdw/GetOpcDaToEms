@@ -98,10 +98,6 @@ namespace OpcDaClient
         private int _readCount;
         private int _consecutiveErrors;
 
-        // SyncRead 是否支持 7 参数版本（首次调用时检测）
-        private bool _syncReadChecked;
-        private bool _syncReadHasQualityTimestamp;
-
         private bool _disposed;
 
         public bool IsRunning { get { return _running; } }
@@ -293,70 +289,23 @@ namespace OpcDaClient
 
         private Dictionary<string, OpcItemValue> DoSyncRead()
         {
-            var results = new Dictionary<string, OpcItemValue>();
-
-            // 复制缓存的 handle 数组（ref 参数安全）
             Array handleArray = (Array)_serverHandleArray.Clone();
 
             Array values;
             Array errors;
+            object qualities;
+            object timeStamps;
 
-            if (!_syncReadChecked)
-            {
-                // 首次读取：检测 SyncRead 是否支持 7 参数版本
-                _syncReadChecked = true;
-                try
-                {
-                    object qualities, timeStamps;
-                    _group.SyncRead(
-                        (short)_config.DataSource,
-                        _itemIds.Length,
-                        ref handleArray,
-                        out values,
-                        out errors,
-                        out qualities,
-                        out timeStamps);
-                    _syncReadHasQualityTimestamp = true;
-                    return ParseSyncResults(values, errors, qualities, timeStamps);
-                }
-                catch (System.Reflection.TargetParameterCountException)
-                {
-                    _syncReadHasQualityTimestamp = false;
-                    // 回退到 5 参数版本
-                    handleArray = (Array)_serverHandleArray.Clone();
-                    _group.SyncRead(
-                        (short)_config.DataSource,
-                        _itemIds.Length,
-                        ref handleArray,
-                        out values,
-                        out errors);
-                    return ParseSyncResults(values, errors, null, null);
-                }
-            }
+            _group.SyncRead(
+                (short)_config.DataSource,
+                _itemIds.Length,
+                ref handleArray,
+                out values,
+                out errors,
+                out qualities,
+                out timeStamps);
 
-            if (_syncReadHasQualityTimestamp)
-            {
-                object qualities, timeStamps;
-                _group.SyncRead(
-                    (short)_config.DataSource,
-                    _itemIds.Length,
-                    ref handleArray,
-                    out values,
-                    out errors,
-                    out qualities,
-                    out timeStamps);
-                return ParseSyncResults(values, errors, qualities, timeStamps);
-            }
-            else
-            {
-                _group.SyncRead(
-                    (short)_config.DataSource,
-                    _itemIds.Length,
-                    ref handleArray,
-                    out values,
-                    out errors);
-                return ParseSyncResults(values, errors, null, null);
-            }
+            return ParseSyncResults(values, errors, qualities, timeStamps);
         }
 
         private Dictionary<string, OpcItemValue> ParseSyncResults(
