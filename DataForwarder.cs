@@ -182,7 +182,6 @@ namespace OpcDaClient
                             {
                                 OpcItemId = item.ItemId,
                                 EmsTagName = item.ItemId,
-                                DataType = EmsDataType.Ax,
                                 DataType = EmsDataType.Ax
                             });
                         }
