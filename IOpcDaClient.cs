@@ -3,12 +3,6 @@ using System.Collections.Generic;
 
 namespace OpcDaClient
 {
-    public enum ReadMode
-    {
-        Sync,
-        Async
-    }
-
     public enum OpcDataSource
     {
         Cache = 1,
@@ -17,13 +11,7 @@ namespace OpcDaClient
 
     public class ReadConfig
     {
-        public ReadMode Mode { get; set; } = ReadMode.Sync;
         public OpcDataSource DataSource { get; set; } = OpcDataSource.Cache;
-        public int AsyncTimeoutMs { get; set; } = 5000;
-
-        public static ReadConfig SyncCache { get { return new ReadConfig { Mode = ReadMode.Sync, DataSource = OpcDataSource.Cache }; } }
-        public static ReadConfig SyncDevice { get { return new ReadConfig { Mode = ReadMode.Sync, DataSource = OpcDataSource.Device }; } }
-        public static ReadConfig AsyncDevice { get { return new ReadConfig { Mode = ReadMode.Async, DataSource = OpcDataSource.Device }; } }
     }
 
     public interface IOpcDaClient : IDisposable
@@ -31,6 +19,8 @@ namespace OpcDaClient
         bool IsConnected { get; }
 
         void Connect(string serverProgId, string host = "localhost");
+        void Connect(string serverProgId, string host, int retryCount, int retryDelayMs);
+        void Reconnect(int retryCount = 3, int retryDelayMs = 3000);
         void Disconnect();
 
         List<string> BrowseServer();
