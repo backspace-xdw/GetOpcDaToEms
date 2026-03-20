@@ -198,6 +198,7 @@ namespace OpcDaClient
             OnLog("启动轮询: " + opcItemIds.Length + " 项, 间隔 " + _config.PollingIntervalMs + "ms");
 
             _reader = new PollingReader(_dcomChannel, opcItemIds, _config.GetReadConfig(), _config.PollingIntervalMs);
+            ((PollingReader)_reader).PollingLog += msg => OnLog(msg);
             _reader.DataReceived += OnDataReceived;
             _reader.ErrorOccurred += OnPollingError;
             _reader.Start();

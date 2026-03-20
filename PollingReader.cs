@@ -61,12 +61,20 @@ namespace OpcDaClient
         public event EventHandler<PollingDataEventArgs> DataReceived;
         public event EventHandler<PollingErrorEventArgs> ErrorOccurred;
 
+        /// <summary>轮询内部日志</summary>
+        public event Action<string> PollingLog;
+
         internal PollingReader(object serverObj, string[] itemIds, ReadConfig config, int intervalMs)
         {
             _serverObj = serverObj;
             _itemIds = (string[])itemIds.Clone();
             _intervalMs = intervalMs;
             _stopSignal = new ManualResetEvent(false);
+        }
+
+        private void PLog(string msg)
+        {
+            PollingLog?.Invoke(msg);
         }
 
         public void Start()
@@ -105,12 +113,19 @@ namespace OpcDaClient
         {
             string groupName = "Poll_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-            // 原生接口：IOPCServer.AddGroup
+            PLog("[轮询] AddGroup: " + groupName);
             RawOpcHelper.AddGroup(_serverObj, groupName, false, 1000,
                 out _serverGroupHandle, out _groupObj);
+            PLog("[轮询] AddGroup 成功, handle=" + _serverGroupHandle);
 
-            // IOPCItemMgt.AddItems
+            PLog("[轮询] AddItems: " + _itemIds.Length + " 项");
+            for (int i = 0; i < _itemIds.Length; i++)
+                PLog("[轮询]   " + _itemIds[i]);
+
             _serverHandles = RawOpcHelper.AddItems(_groupObj, _itemIds);
+            PLog("[轮询] AddItems 成功");
+            for (int i = 0; i < _serverHandles.Length; i++)
+                PLog("[轮询]   " + _itemIds[i] + " → handle=" + _serverHandles[i]);
         }
 
         private void CleanupGroup()
@@ -122,17 +137,20 @@ namespace OpcDaClient
 
         private void PollingLoop()
         {
+            PLog("[轮询] 轮询线程已启动");
+
             while (_running)
             {
                 try
                 {
+                    PLog("[轮询] SyncRead 开始...");
                     var sw = Stopwatch.StartNew();
 
-                    // IOPCSyncIO.Read（从 Device 读取）
                     var results = RawOpcHelper.SyncRead(
                         _groupObj, _serverHandles, _itemIds, 2);
 
                     sw.Stop();
+                    PLog("[轮询] SyncRead 完成, " + results.Count + " 项, " + sw.ElapsedMilliseconds + "ms");
                     _readCount++;
                     _consecutiveErrors = 0;
 
