@@ -40,8 +40,9 @@ namespace OpcDaClient
             OnLog("OPC → EMS 数据转发器启动");
             OnLog("========================================");
 
-            // 1. 枚举远程 OPC 服务器，验证配置的 ProgId
+            // 1. 枚举远程 OPC 服务器，验证配置的 ProgId，获取 CLSID
             OnLog("枚举 " + _config.Host + " 上的 OPC DA 服务器...");
+            Guid serverClsid = Guid.Empty;
             var servers = DcomHelper.EnumRemoteServers(_config.Host, msg => OnLog(msg));
 
             if (servers.Count > 0)
@@ -53,7 +54,9 @@ namespace OpcDaClient
                         StringComparison.OrdinalIgnoreCase))
                     {
                         found = true;
+                        serverClsid = srv.Clsid;
                         OnLog("匹配成功: " + srv.ProgId + " (" + srv.Description + ")");
+                        OnLog("CLSID: " + srv.Clsid);
                         break;
                     }
                 }
@@ -72,26 +75,22 @@ namespace OpcDaClient
             }
             else
             {
-                OnLog("[警告] 无法枚举远程服务器（OpcEnum 不可用），直接尝试连接...");
+                OnLog("[警告] 无法枚举远程服务器，直接尝试连接...");
             }
 
-            // 2. 连接 OPC 服务器
+            // 2. 用 OpcEnum 拿到的 CLSID 预热 DCOM 通道（无限重试直到通）
+            if (serverClsid != Guid.Empty)
+            {
+                OnLog("使用 CLSID 预热 DCOM 通道...");
+                WarmUpWithClsid(serverClsid);
+            }
+
+            // 3. 连接 OPC 服务器（无限重试）
             OnLog("连接 OPC: " + _config.ServerProgId + "@" + _config.Host);
             _client = new OpcDaClient();
             _client.ConnectLog += (msg) => OnLog(msg);
 
-            try
-            {
-                _client.Connect(_config.ServerProgId, _config.Host,
-                    _config.RetryCount, _config.RetryDelayMs);
-            }
-            catch (Exception ex)
-            {
-                OnLog("[错误] 连接失败: " + ex.Message);
-                _client.Dispose();
-                _client = null;
-                return;
-            }
+            ConnectWithInfiniteRetry();
 
             // 2. 确定点位列表
             if (_config.Points.Count > 0)
@@ -216,6 +215,74 @@ namespace OpcDaClient
                         OnLog("  " + branch + ": 浏览失败 - " + ex.Message);
                     }
                 }
+            }
+        }
+
+        /// <summary>
+        /// 用 CLSID 预热 DCOM（OpcEnum 已经拿到 CLSID，不依赖本地注册）
+        /// </summary>
+        private void WarmUpWithClsid(Guid clsid)
+        {
+            int attempt = 0;
+            int delayMs = _config.RetryDelayMs;
+
+            while (IsRunning || attempt == 0)
+            {
+                attempt++;
+                try
+                {
+                    OnLog("[DCOM] CoCreateInstanceEx (CLSID) 第 " + attempt + " 次...");
+                    object instance = DcomHelper.CreateRemoteInstanceByClsid(clsid, _config.Host);
+                    if (instance != null)
+                    {
+                        Marshal.FinalReleaseComObject(instance);
+                        OnLog("[DCOM] DCOM 通道已建立");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (attempt <= 3 || attempt % 10 == 0)
+                        OnLog("[DCOM] 第 " + attempt + " 次失败: " + ex.Message);
+                }
+
+                Thread.Sleep(delayMs);
+                if (attempt >= 10) delayMs = Math.Min(delayMs * 2, 30000);
+            }
+        }
+
+        /// <summary>
+        /// 首次连接（无限重试）
+        /// </summary>
+        private void ConnectWithInfiniteRetry()
+        {
+            int attempt = 0;
+            int delayMs = _config.RetryDelayMs;
+
+            while (true)
+            {
+                attempt++;
+                try
+                {
+                    _client.Connect(_config.ServerProgId, _config.Host, 1, 0);
+                    OnLog("[连接成功]");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    if (attempt <= 5 || attempt % 10 == 0)
+                    {
+                        OnLog("[连接] 第 " + attempt + " 次失败: " + ex.Message +
+                              " | " + delayMs / 1000 + "s 后重试");
+                    }
+                }
+
+                Thread.Sleep(delayMs);
+                // 逐步增加间隔：3s → 5s → 10s → 30s → 60s
+                if (attempt >= 20) delayMs = 60000;
+                else if (attempt >= 10) delayMs = 30000;
+                else if (attempt >= 5) delayMs = 10000;
+                else if (attempt >= 3) delayMs = 5000;
             }
         }
 
