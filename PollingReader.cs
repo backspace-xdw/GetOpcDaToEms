@@ -114,7 +114,7 @@ namespace OpcDaClient
             string groupName = "Poll_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
             PLog("[轮询] AddGroup: " + groupName);
-            RawOpcHelper.AddGroup(_serverObj, groupName, false, 1000,
+            RawOpcHelper.AddGroup(_serverObj, groupName, true, 1000,
                 out _serverGroupHandle, out _groupObj);
             PLog("[轮询] AddGroup 成功, handle=" + _serverGroupHandle);
 

@@ -65,7 +65,7 @@ namespace OpcDaClient
 
         #endregion
 
-        [STAThread]
+        [MTAThread]
         static void Main(string[] args)
         {
             InitComSecurity();
