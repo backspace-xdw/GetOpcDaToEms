@@ -179,7 +179,9 @@ namespace OpcDaClient
 
         private static PointMapping ParsePointLine(string line, int lineNum)
         {
-            var parts = line.Split('|');
+            // 支持逗号或竖线分隔
+            char separator = line.Contains(",") ? ',' : '|';
+            var parts = line.Split(separator);
             if (parts.Length < 3) return null;
 
             var dataTypeStr = parts[2].Trim().ToLower();
@@ -227,7 +229,7 @@ RetryCount=5
 RetryDelayMs=3000
 
 # [Points] 留空 = 自动浏览OPC服务器所有点位
-# 如需指定部分点位: OPC点位ID | EMS点名 | 类型(Ax/Dx/Cx)
+# 如需指定部分点位: OPC点位ID, EMS点名, 类型(Ax/Dx/Cx)
 [Points]
 ");
         }
