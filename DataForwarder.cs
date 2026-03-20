@@ -40,7 +40,42 @@ namespace OpcDaClient
             OnLog("OPC → EMS 数据转发器启动");
             OnLog("========================================");
 
-            // 1. 连接 OPC 服务器（带重试）
+            // 1. 枚举远程 OPC 服务器，验证配置的 ProgId
+            OnLog("枚举 " + _config.Host + " 上的 OPC DA 服务器...");
+            var servers = DcomHelper.EnumRemoteServers(_config.Host, msg => OnLog(msg));
+
+            if (servers.Count > 0)
+            {
+                bool found = false;
+                foreach (var srv in servers)
+                {
+                    if (string.Equals(srv.ProgId, _config.ServerProgId,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = true;
+                        OnLog("匹配成功: " + srv.ProgId + " (" + srv.Description + ")");
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    OnLog("[警告] 配置的 ProgId '" + _config.ServerProgId + "' 未在远程服务器上找到");
+                    OnLog("远程可用的 OPC DA 服务器:");
+                    foreach (var srv in servers)
+                    {
+                        OnLog("  " + srv.ProgId + " - " + srv.Description);
+                    }
+                    OnLog("请修改配置文件中的 ProgId 为以上之一");
+                    return;
+                }
+            }
+            else
+            {
+                OnLog("[警告] 无法枚举远程服务器（OpcEnum 不可用），直接尝试连接...");
+            }
+
+            // 2. 连接 OPC 服务器
             OnLog("连接 OPC: " + _config.ServerProgId + "@" + _config.Host);
             _client = new OpcDaClient();
             _client.ConnectLog += (msg) => OnLog(msg);

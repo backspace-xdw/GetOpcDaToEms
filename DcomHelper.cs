@@ -1,8 +1,23 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace OpcDaClient
 {
+    /// <summary>
+    /// 远程 OPC 服务器信息
+    /// </summary>
+    public class OpcServerInfo
+    {
+        public Guid Clsid { get; set; }
+        public string ProgId { get; set; }
+        public string Description { get; set; }
+
+        public override string ToString()
+        {
+            return ProgId + " - " + Description;
+        }
+    }
     /// <summary>
     /// 标准 DCOM 连接助手
     /// 使用 CoCreateInstanceEx + COSERVERINFO + COAUTHINFO
@@ -72,6 +87,142 @@ namespace OpcDaClient
         private const uint EOAC_NONE = 0;
 
         #endregion
+
+        #region OpcEnum 接口（枚举远程 OPC 服务器）
+
+        // IOPCServerList IID
+        [ComImport, Guid("13486D50-4821-11D2-A494-3CB306C10000")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IOPCServerList
+        {
+            void EnumClassesOfCategories(
+                uint cImplemented,
+                [MarshalAs(UnmanagedType.LPArray)] Guid[] rgcatidImpl,
+                uint cRequired,
+                [MarshalAs(UnmanagedType.LPArray)] Guid[] rgcatidReq,
+                [MarshalAs(UnmanagedType.Interface)] out object ppEnumClsid);
+
+            void GetClassDetails(
+                ref Guid clsid,
+                [MarshalAs(UnmanagedType.LPWStr)] out string ppszProgID,
+                [MarshalAs(UnmanagedType.LPWStr)] out string ppszUserType);
+
+            void CLSIDFromProgID(
+                [MarshalAs(UnmanagedType.LPWStr)] string szProgId,
+                out Guid clsid);
+        }
+
+        // IEnumGUID IID
+        [ComImport, Guid("0002E000-0000-0000-C000-000000000046")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IEnumGUID
+        {
+            int Next(uint celt,
+                [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)] Guid[] rgelt,
+                out uint pceltFetched);
+            void Skip(uint celt);
+            void Reset();
+            void Clone([MarshalAs(UnmanagedType.Interface)] out IEnumGUID ppEnum);
+        }
+
+        // OPC DA 分类 GUID
+        private static readonly Guid CATID_OPCDAServer10 = new Guid("63D5F430-CFE4-11D1-B2C8-0060083BA1FB");
+        private static readonly Guid CATID_OPCDAServer20 = new Guid("63D5F432-CFE4-11D1-B2C8-0060083BA1FB");
+        private static readonly Guid CATID_OPCDAServer30 = new Guid("CC603642-66D7-48F1-B69A-B625E73652D7");
+
+        // OpcEnum CLSID
+        private static readonly Guid CLSID_OpcEnum = new Guid("13486D51-4821-11D2-A494-3CB306C10000");
+
+        #endregion
+
+        /// <summary>
+        /// 枚举远程机器上所有 OPC DA 服务器
+        /// 等同于标准 OPC 测试工具的"浏览服务器"功能
+        /// </summary>
+        public static List<OpcServerInfo> EnumRemoteServers(string host, Action<string> log = null)
+        {
+            var result = new List<OpcServerInfo>();
+
+            log?.Invoke("[枚举] 连接 OpcEnum@" + host + "...");
+
+            // 通过 DCOM 创建远程 OpcEnum 实例
+            object opcEnumObj;
+            try
+            {
+                opcEnumObj = CreateRemoteInstanceByClsid(CLSID_OpcEnum, host);
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke("[枚举] 连接 OpcEnum 失败: " + ex.Message);
+                return result;
+            }
+
+            try
+            {
+                var serverList = (IOPCServerList)opcEnumObj;
+
+                // 枚举 OPC DA 1.0/2.0/3.0 所有类别
+                Guid[] categories = new Guid[] { CATID_OPCDAServer10, CATID_OPCDAServer20, CATID_OPCDAServer30 };
+                var foundClsids = new HashSet<string>();
+
+                foreach (var catId in categories)
+                {
+                    try
+                    {
+                        object enumObj;
+                        serverList.EnumClassesOfCategories(
+                            1, new Guid[] { catId },
+                            0, null,
+                            out enumObj);
+
+                        if (enumObj == null) continue;
+                        var enumGuid = (IEnumGUID)enumObj;
+
+                        Guid[] buffer = new Guid[1];
+                        uint fetched;
+
+                        while (true)
+                        {
+                            int hr = enumGuid.Next(1, buffer, out fetched);
+                            if (hr != 0 || fetched == 0) break;
+
+                            string clsidStr = buffer[0].ToString();
+                            if (foundClsids.Contains(clsidStr)) continue;
+                            foundClsids.Add(clsidStr);
+
+                            try
+                            {
+                                Guid clsid = buffer[0];
+                                string progId, description;
+                                serverList.GetClassDetails(ref clsid, out progId, out description);
+
+                                result.Add(new OpcServerInfo
+                                {
+                                    Clsid = clsid,
+                                    ProgId = progId ?? "",
+                                    Description = description ?? ""
+                                });
+                            }
+                            catch { }
+                        }
+
+                        Marshal.ReleaseComObject(enumObj);
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke("[枚举] 枚举过程出错: " + ex.Message);
+            }
+            finally
+            {
+                Marshal.FinalReleaseComObject(opcEnumObj);
+            }
+
+            log?.Invoke("[枚举] 发现 " + result.Count + " 个 OPC DA 服务器");
+            return result;
+        }
 
         /// <summary>
         /// 使用标准 DCOM 方式创建远程 COM 实例
