@@ -81,17 +81,16 @@ namespace OpcDaClient
                     }
                     catch (Exception connectEx)
                     {
-                        // OPCAutomation 的 Connect 在 IOPCShutdown 回调设置失败时抛 E_FAIL
-                        // 但连接本身可能已经建立了（测试工具也是忽略这个错误继续用的）
-                        // 检查连接是否实际可用
-                        if (CheckServerAlive())
-                        {
-                            Log("[连接] Connect 抛出异常但服务器可访问，忽略: " + connectEx.Message);
-                        }
-                        else
-                        {
-                            throw;
-                        }
+                        // 第一次 Connect 可能因 IOPCShutdown 回调失败抛 E_FAIL
+                        // 但 DCOM 通道已建立，重新创建 OPCServer 再连一次
+                        Log("[连接] 首次 Connect 异常: " + connectEx.Message + "，DCOM 通道可能已建立，重试...");
+
+                        try { Marshal.FinalReleaseComObject(_opcServer); } catch { }
+                        _opcServer = new OPCServer();
+                        SetProxySecurity(_opcServer);
+
+                        _opcServer.Connect(serverProgId, host);
+                        Log("[连接] 重试 Connect 成功");
                     }
 
                     IsConnected = true;
