@@ -100,8 +100,7 @@ namespace OpcDaClient
 
             ConnectWithInfiniteRetry();
 
-            // 连接成功，释放 DCOM 通道保持对象
-            ReleaseDcomChannel();
+            // DCOM 通道对象保持不释放，程序运行期间一直开放，断线重连时复用;
 
             // 2. 确定点位列表
             if (_config.Points.Count > 0)
