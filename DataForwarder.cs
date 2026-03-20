@@ -329,29 +329,30 @@ namespace OpcDaClient
                 try
                 {
                     int ret = 0;
-                    float fVal = 0;
+                    string valStr = "" + kvp.Value.Value;
                     switch (mapping.DataType)
                     {
                         case EmsDataType.Ax:
-                            fVal = Convert.ToSingle(kvp.Value.Value);
+                            float fVal = Convert.ToSingle(kvp.Value.Value);
                             ret = EmsPlus.WriteAnalog(mapping.EmsTagName, fVal);
+                            valStr = fVal.ToString();
                             break;
                         case EmsDataType.Dx:
                             bool bVal = Convert.ToBoolean(kvp.Value.Value);
                             ret = EmsPlus.WriteDigital(mapping.EmsTagName, bVal);
+                            valStr = bVal.ToString();
                             break;
                         case EmsDataType.Cx:
                             string sVal = Convert.ToString(kvp.Value.Value);
                             ret = EmsPlus.WriteString(mapping.EmsTagName, sVal);
+                            valStr = sVal;
                             break;
                     }
 
-                    // 每 10 次轮询打印一次详细值，平时只打印摘要
-                    if (e.ReadCount <= 3 || e.ReadCount % 10 == 0)
-                    {
-                        OnLog("  " + mapping.EmsTagName + " = " + kvp.Value.Value +
-                              " → EMS(ret=" + ret + ")");
-                    }
+                    OnLog("  " + kvp.Key + " = " + valStr +
+                          " (质量:" + kvp.Value.Quality + ")" +
+                          " → 写入 " + mapping.EmsTagName +
+                          (ret == 0 ? " 成功" : " 失败(ret=" + ret + ")"));
 
                     forwarded++;
                 }
