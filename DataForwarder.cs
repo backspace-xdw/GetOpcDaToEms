@@ -7,17 +7,15 @@ namespace OpcDaClient
 {
     /// <summary>
     /// OPC → EMS 数据转发器
-    /// 自动连接（带重试）→ 自动浏览 → 自动轮询 → 自动转发
-    /// 轮询中断线自动重连
+    /// 使用原生 OPC DA COM 接口，不依赖 OPCAutomation
     /// </summary>
     public class DataForwarder : IDisposable
     {
         private readonly ForwarderConfig _config;
-        private OpcDaClient _client;
         private IPollingReader _reader;
         private bool _disposed;
 
-        // 保持 DCOM 通道的 COM 对象（不释放，保持通道开放）
+        // DCOM 通道 COM 对象（IOPCServer），程序运行期间保持
         private object _dcomChannel;
 
         private Dictionary<string, PointMapping> _mappingDict;
@@ -44,7 +42,7 @@ namespace OpcDaClient
             OnLog("OPC → EMS 数据转发器启动");
             OnLog("========================================");
 
-            // 1. 枚举远程 OPC 服务器，验证配置的 ProgId，获取 CLSID
+            // 1. 枚举远程 OPC 服务器，验证 ProgId，获取 CLSID
             OnLog("枚举 " + _config.Host + " 上的 OPC DA 服务器...");
             Guid serverClsid = Guid.Empty;
             var servers = DcomHelper.EnumRemoteServers(_config.Host, msg => OnLog(msg));
@@ -67,13 +65,11 @@ namespace OpcDaClient
 
                 if (!found)
                 {
-                    OnLog("[警告] 配置的 ProgId '" + _config.ServerProgId + "' 未在远程服务器上找到");
+                    OnLog("[警告] 配置的 ProgId '" + _config.ServerProgId + "' 未找到");
                     OnLog("远程可用的 OPC DA 服务器:");
                     foreach (var srv in servers)
-                    {
                         OnLog("  " + srv.ProgId + " - " + srv.Description);
-                    }
-                    OnLog("请修改配置文件中的 ProgId 为以上之一");
+                    OnLog("请修改配置文件中的 ProgId");
                     return;
                 }
             }
@@ -82,49 +78,36 @@ namespace OpcDaClient
                 OnLog("[警告] 无法枚举远程服务器，直接尝试连接...");
             }
 
-            // 2. 用 OpcEnum 拿到的 CLSID：注册本地 + 预热 DCOM 通道
+            // 2. 注册 ProgID 到本地 + 建立 DCOM 通道（无限重试）
             if (serverClsid != Guid.Empty)
             {
-                // 注册 ProgID → CLSID 到本地注册表，让 OPCAutomation 查得到
                 DcomHelper.RegisterProgIdLocally(_config.ServerProgId, serverClsid,
                     msg => OnLog(msg));
-
-                OnLog("使用 CLSID 预热 DCOM 通道...");
-                WarmUpWithClsid(serverClsid);
             }
 
-            // DCOM 通道对象就是原生 IOPCServer，直接用于数据读取
-            OnLog("DCOM 通道已就绪，跳过 OPCAutomation 包装");
+            OnLog("建立 DCOM 通道...");
+            ConnectDcom(serverClsid);
 
-            // 2. 确定点位列表
-            if (_config.Points.Count > 0)
+            if (_dcomChannel == null)
             {
-                OnLog("使用配置文件中的 " + _config.Points.Count + " 个点位");
-            }
-            else
-            {
-                OnLog("自动浏览 OPC 服务器...");
-                AutoDiscoverPoints();
-                OnLog("发现 " + _config.Points.Count + " 个点位");
-            }
-
-            if (_config.Points.Count == 0)
-            {
-                OnLog("[错误] 未发现任何点位，停止");
-                _client.Disconnect();
-                _client.Dispose();
-                _client = null;
+                OnLog("[错误] DCOM 通道建立失败");
                 return;
             }
+
+            // 3. 验证配置的点位
+            if (_config.Points.Count == 0)
+            {
+                OnLog("[错误] 配置文件中没有点位，请在 [Points] 段添加");
+                return;
+            }
+            OnLog("使用配置文件中的 " + _config.Points.Count + " 个点位");
 
             // 构建映射字典
             _mappingDict = new Dictionary<string, PointMapping>();
             foreach (var p in _config.Points)
-            {
                 _mappingDict[p.OpcItemId] = p;
-            }
 
-            // 3. 预热 EMS ID 缓存
+            // 4. 预热 EMS ID 缓存
             OnLog("预热 EMS 变量 ID...");
             EmsPlus.ClearCache();
             int ok = 0, fail = 0;
@@ -134,26 +117,17 @@ namespace OpcDaClient
                 {
                     switch (p.DataType)
                     {
-                        case EmsDataType.Dx:
-                            EmsPlus.GetDxId(p.EmsTagName);
-                            break;
-                        case EmsDataType.Cx:
-                            EmsPlus.GetCxId(p.EmsTagName);
-                            break;
-                        default:
-                            EmsPlus.GetAxId(p.EmsTagName);
-                            break;
+                        case EmsDataType.Dx: EmsPlus.GetDxId(p.EmsTagName); break;
+                        case EmsDataType.Cx: EmsPlus.GetCxId(p.EmsTagName); break;
+                        default: EmsPlus.GetAxId(p.EmsTagName); break;
                     }
                     ok++;
                 }
-                catch
-                {
-                    fail++;
-                }
+                catch { fail++; }
             }
             OnLog("EMS ID: " + ok + " 成功, " + fail + " 失败");
 
-            // 4. 启动轮询
+            // 5. 启动轮询
             StartPolling();
 
             IsRunning = true;
@@ -164,85 +138,43 @@ namespace OpcDaClient
             OnLog("----------------------------------------");
         }
 
-        private void StartPolling()
-        {
-            var opcItemIds = _config.GetOpcItemIds();
-            OnLog("启动轮询: " + opcItemIds.Length + " 项, 间隔 " + _config.PollingIntervalMs + "ms");
-
-            // 使用 DCOM 通道的原生 COM 对象（IOPCServer），不经过 OPCAutomation
-            object serverObj = _dcomChannel;
-
-            _reader = new PollingReader(serverObj, opcItemIds, _config.GetReadConfig(), _config.PollingIntervalMs);
-            _reader.DataReceived += OnDataReceived;
-            _reader.ErrorOccurred += OnPollingError;
-            _reader.Start();
-        }
-
-        private void AutoDiscoverPoints()
-        {
-            _config.Points.Clear();
-
-            var branches = _client.BrowseServer();
-
-            if (branches.Count == 0)
-            {
-                var items = _client.BrowseItems("");
-                foreach (var item in items)
-                {
-                    _config.Points.Add(new PointMapping
-                    {
-                        OpcItemId = item.ItemId,
-                        EmsTagName = item.ItemId,
-                        DataType = EmsDataType.Ax
-                    });
-                }
-            }
-            else
-            {
-                foreach (var branch in branches)
-                {
-                    try
-                    {
-                        var items = _client.BrowseItems(branch);
-                        OnLog("  " + branch + ": " + items.Count + " 个点位");
-                        foreach (var item in items)
-                        {
-                            _config.Points.Add(new PointMapping
-                            {
-                                OpcItemId = item.ItemId,
-                                EmsTagName = item.ItemId,
-                                DataType = EmsDataType.Ax
-                            });
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        OnLog("  " + branch + ": 浏览失败 - " + ex.Message);
-                    }
-                }
-            }
-        }
-
         /// <summary>
-        /// 用 CLSID 预热 DCOM（OpcEnum 已经拿到 CLSID，不依赖本地注册）
+        /// 建立 DCOM 通道（无限重试）
         /// </summary>
-        private void WarmUpWithClsid(Guid clsid)
+        private void ConnectDcom(Guid clsid)
         {
+            if (clsid == Guid.Empty)
+            {
+                // 没有 CLSID（OpcEnum 不可用），尝试通过 ProgID
+                try
+                {
+                    _dcomChannel = DcomHelper.CreateRemoteInstance(_config.ServerProgId, _config.Host);
+                    OnLog("[DCOM] 通道已建立");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    OnLog("[DCOM] 通过 ProgID 创建失败: " + ex.Message);
+                    return;
+                }
+            }
+
             int attempt = 0;
             int delayMs = _config.RetryDelayMs;
 
-            while (IsRunning || attempt == 0)
+            while (true)
             {
                 attempt++;
                 try
                 {
-                    OnLog("[DCOM] CoCreateInstanceEx (CLSID) 第 " + attempt + " 次...");
-                    object instance = DcomHelper.CreateRemoteInstanceByClsid(clsid, _config.Host);
-                    if (instance != null)
+                    if (attempt <= 3 || attempt % 10 == 0)
+                        OnLog("[DCOM] CoCreateInstanceEx 第 " + attempt + " 次...");
+
+                    _dcomChannel = DcomHelper.CreateRemoteInstanceByClsid(clsid, _config.Host);
+
+                    if (_dcomChannel != null)
                     {
-                        // 不释放！保持 DCOM 通道开放，直到连接成功
-                        _dcomChannel = instance;
-                        OnLog("[DCOM] DCOM 通道已建立（保持开放）");
+                        OnLog("[DCOM] 通道已建立");
                         return;
                     }
                 }
@@ -253,38 +185,6 @@ namespace OpcDaClient
                 }
 
                 Thread.Sleep(delayMs);
-                if (attempt >= 10) delayMs = Math.Min(delayMs * 2, 30000);
-            }
-        }
-
-        /// <summary>
-        /// 首次连接（无限重试）
-        /// </summary>
-        private void ConnectWithInfiniteRetry()
-        {
-            int attempt = 0;
-            int delayMs = _config.RetryDelayMs;
-
-            while (true)
-            {
-                attempt++;
-                try
-                {
-                    _client.Connect(_config.ServerProgId, _config.Host, 1, 0);
-                    OnLog("[连接成功]");
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    if (attempt <= 5 || attempt % 10 == 0)
-                    {
-                        OnLog("[连接] 第 " + attempt + " 次失败: " + ex.Message +
-                              " | " + delayMs / 1000 + "s 后重试");
-                    }
-                }
-
-                Thread.Sleep(delayMs);
-                // 逐步增加间隔：3s → 5s → 10s → 30s → 60s
                 if (attempt >= 20) delayMs = 60000;
                 else if (attempt >= 10) delayMs = 30000;
                 else if (attempt >= 5) delayMs = 10000;
@@ -292,12 +192,23 @@ namespace OpcDaClient
             }
         }
 
+        private void StartPolling()
+        {
+            var opcItemIds = _config.GetOpcItemIds();
+            OnLog("启动轮询: " + opcItemIds.Length + " 项, 间隔 " + _config.PollingIntervalMs + "ms");
+
+            _reader = new PollingReader(_dcomChannel, opcItemIds, _config.GetReadConfig(), _config.PollingIntervalMs);
+            _reader.DataReceived += OnDataReceived;
+            _reader.ErrorOccurred += OnPollingError;
+            _reader.Start();
+        }
+
         /// <summary>
-        /// 断线重连（无限重试，直到恢复或用户手动停止）
+        /// 断线重连（无限重试）
         /// </summary>
         private void TryReconnect()
         {
-            OnLog("[重连] OPC 服务器断开，开始无限重连...");
+            OnLog("[重连] OPC 断开，开始重连...");
 
             // 清理旧轮询器
             if (_reader != null)
@@ -309,48 +220,63 @@ namespace OpcDaClient
                 _reader = null;
             }
 
+            // 释放旧 DCOM 通道
+            if (_dcomChannel != null)
+            {
+                try { Marshal.FinalReleaseComObject(_dcomChannel); } catch { }
+                _dcomChannel = null;
+            }
+
             int attempt = 0;
             int delayMs = _config.RetryDelayMs;
+
+            // 需要重新获取 CLSID
+            Guid clsid = Guid.Empty;
+            try
+            {
+                var servers = DcomHelper.EnumRemoteServers(_config.Host);
+                foreach (var srv in servers)
+                {
+                    if (string.Equals(srv.ProgId, _config.ServerProgId,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        clsid = srv.Clsid;
+                        break;
+                    }
+                }
+            }
+            catch { }
 
             while (IsRunning)
             {
                 attempt++;
                 try
                 {
-                    _client.Reconnect(1, 0);
-                    OnLog("[重连] 第 " + attempt + " 次重连成功");
+                    if (clsid != Guid.Empty)
+                        _dcomChannel = DcomHelper.CreateRemoteInstanceByClsid(clsid, _config.Host);
+                    else
+                        _dcomChannel = DcomHelper.CreateRemoteInstance(_config.ServerProgId, _config.Host);
 
-                    StartPolling();
-                    OnLog("[重连] 轮询已恢复");
-                    return;
+                    if (_dcomChannel != null)
+                    {
+                        OnLog("[重连] 第 " + attempt + " 次成功");
+                        StartPolling();
+                        OnLog("[重连] 轮询已恢复");
+                        return;
+                    }
                 }
                 catch (Exception ex)
                 {
-                    // 每 10 次打印一次日志，避免刷屏
                     if (attempt <= 5 || attempt % 10 == 0)
-                    {
                         OnLog("[重连] 第 " + attempt + " 次失败: " + ex.Message +
-                              " | 下次重试 " + delayMs / 1000 + "s 后");
-                    }
+                              " | " + delayMs / 1000 + "s 后重试");
                 }
 
-                // 等待（可被 Stop 中断）
                 Thread.Sleep(delayMs);
-
-                // 逐步增加重试间隔：3s → 5s → 10s → 30s → 最大 60s
                 if (attempt >= 20) delayMs = 60000;
                 else if (attempt >= 10) delayMs = 30000;
                 else if (attempt >= 5) delayMs = 10000;
                 else if (attempt >= 3) delayMs = 5000;
-            }
-        }
-
-        private void ReleaseDcomChannel()
-        {
-            if (_dcomChannel != null)
-            {
-                try { Marshal.FinalReleaseComObject(_dcomChannel); } catch { }
-                _dcomChannel = null;
             }
         }
 
@@ -360,7 +286,6 @@ namespace OpcDaClient
 
             OnLog("----------------------------------------");
             OnLog("正在停止...");
-            ReleaseDcomChannel();
 
             if (_reader != null)
             {
@@ -371,11 +296,10 @@ namespace OpcDaClient
                 _reader = null;
             }
 
-            if (_client != null)
+            if (_dcomChannel != null)
             {
-                _client.Disconnect();
-                _client.Dispose();
-                _client = null;
+                try { Marshal.FinalReleaseComObject(_dcomChannel); } catch { }
+                _dcomChannel = null;
             }
 
             IsRunning = false;
@@ -416,10 +340,7 @@ namespace OpcDaClient
                     }
                     forwarded++;
                 }
-                catch
-                {
-                    errors++;
-                }
+                catch { errors++; }
             }
 
             _totalForwarded += forwarded;
@@ -435,14 +356,11 @@ namespace OpcDaClient
         {
             OnLog("[轮询错误] " + e.Exception.Message + " (连续第 " + e.ConsecutiveErrors + " 次)");
 
-            // 连续 3 次错误就触发重连
             if (e.ConsecutiveErrors >= 3)
             {
-                OnLog("[断线检测] 连续 3 次读取失败，判定为断线，触发重连...");
-                // 在新线程中重连，避免在 PollingReader 线程上 Stop 自己导致死锁
+                OnLog("[断线检测] 连续 3 次失败，触发重连...");
                 var reconnectThread = new Thread(() =>
                 {
-                    // 先停掉当前 PollingReader
                     var reader = _reader;
                     if (reader != null)
                     {
