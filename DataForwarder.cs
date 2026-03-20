@@ -42,14 +42,13 @@ namespace OpcDaClient
 
             // 1. 连接 OPC 服务器（带重试）
             OnLog("连接 OPC: " + _config.ServerProgId + "@" + _config.Host);
-            OnLog("预热 DCOM 通道 + 连接 (重试 " + _config.RetryCount + " 次, 间隔 " + _config.RetryDelayMs + "ms)");
             _client = new OpcDaClient();
+            _client.ConnectLog += (msg) => OnLog(msg);
 
             try
             {
                 _client.Connect(_config.ServerProgId, _config.Host,
                     _config.RetryCount, _config.RetryDelayMs);
-                OnLog("OPC 连接成功");
             }
             catch (Exception ex)
             {
