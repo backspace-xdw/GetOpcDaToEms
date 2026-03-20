@@ -74,7 +74,25 @@ namespace OpcDaClient
                     SetProxySecurity(_opcServer);
 
                     Log("[连接 " + attempt + "/" + retryCount + "] Connect(" + serverProgId + ", " + host + ")...");
-                    _opcServer.Connect(serverProgId, host);
+
+                    try
+                    {
+                        _opcServer.Connect(serverProgId, host);
+                    }
+                    catch (Exception connectEx)
+                    {
+                        // OPCAutomation 的 Connect 在 IOPCShutdown 回调设置失败时抛 E_FAIL
+                        // 但连接本身可能已经建立了（测试工具也是忽略这个错误继续用的）
+                        // 检查连接是否实际可用
+                        if (CheckServerAlive())
+                        {
+                            Log("[连接] Connect 抛出异常但服务器可访问，忽略: " + connectEx.Message);
+                        }
+                        else
+                        {
+                            throw;
+                        }
+                    }
 
                     IsConnected = true;
                     Log("[连接成功]");
@@ -185,6 +203,36 @@ namespace OpcDaClient
                 State = (OpcServerState)_opcServer.ServerState,
                 VendorInfo = _opcServer.VendorInfo
             };
+        }
+
+        /// <summary>
+        /// 检查 OPC 服务器是否实际可访问（Connect 可能抛异常但连接已建立）
+        /// </summary>
+        private bool CheckServerAlive()
+        {
+            try
+            {
+                // 尝试访问服务器属性，能访问说明连接是通的
+                var state = _opcServer.ServerState;
+                return true;
+            }
+            catch { }
+
+            try
+            {
+                var name = _opcServer.ServerName;
+                return !string.IsNullOrEmpty(name);
+            }
+            catch { }
+
+            try
+            {
+                _opcServer.CreateBrowser();
+                return true;
+            }
+            catch { }
+
+            return false;
         }
 
         private void EnsureConnected()
