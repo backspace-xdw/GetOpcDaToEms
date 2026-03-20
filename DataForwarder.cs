@@ -220,11 +220,11 @@ namespace OpcDaClient
         }
 
         /// <summary>
-        /// 断线重连
+        /// 断线重连（无限重试，直到恢复或用户手动停止）
         /// </summary>
         private void TryReconnect()
         {
-            OnLog("[重连] 尝试重新连接 OPC 服务器...");
+            OnLog("[重连] OPC 服务器断开，开始无限重连...");
 
             // 清理旧轮询器
             if (_reader != null)
@@ -236,30 +236,40 @@ namespace OpcDaClient
                 _reader = null;
             }
 
-            for (int attempt = 1; attempt <= _config.RetryCount; attempt++)
+            int attempt = 0;
+            int delayMs = _config.RetryDelayMs;
+
+            while (IsRunning)
             {
+                attempt++;
                 try
                 {
                     _client.Reconnect(1, 0);
                     OnLog("[重连] 第 " + attempt + " 次重连成功");
 
-                    // 重新启动轮询
                     StartPolling();
                     OnLog("[重连] 轮询已恢复");
                     return;
                 }
                 catch (Exception ex)
                 {
-                    OnLog("[重连] 第 " + attempt + "/" + _config.RetryCount + " 次失败: " + ex.Message);
-                    if (attempt < _config.RetryCount)
+                    // 每 10 次打印一次日志，避免刷屏
+                    if (attempt <= 5 || attempt % 10 == 0)
                     {
-                        Thread.Sleep(_config.RetryDelayMs);
+                        OnLog("[重连] 第 " + attempt + " 次失败: " + ex.Message +
+                              " | 下次重试 " + delayMs / 1000 + "s 后");
                     }
                 }
-            }
 
-            OnLog("[重连] 重连耗尽，停止转发");
-            IsRunning = false;
+                // 等待（可被 Stop 中断）
+                Thread.Sleep(delayMs);
+
+                // 逐步增加重试间隔：3s → 5s → 10s → 30s → 最大 60s
+                if (attempt >= 20) delayMs = 60000;
+                else if (attempt >= 10) delayMs = 30000;
+                else if (attempt >= 5) delayMs = 10000;
+                else if (attempt >= 3) delayMs = 5000;
+            }
         }
 
         public void Stop()
@@ -340,12 +350,22 @@ namespace OpcDaClient
 
         private void OnPollingError(object sender, PollingErrorEventArgs e)
         {
-            OnLog("[轮询错误] " + e.Exception.Message + " (第 " + e.ConsecutiveErrors + " 次)");
+            OnLog("[轮询错误] " + e.Exception.Message + " (连续第 " + e.ConsecutiveErrors + " 次)");
 
-            // 连续错误达到阈值，尝试重连而不是直接退出
-            if (e.ConsecutiveErrors >= 5)
+            // 连续 3 次错误就触发重连（不等到 PollingReader 的 10 次上限）
+            if (e.ConsecutiveErrors >= 3)
             {
-                OnLog("[轮询中断] 连续 5 次错误，触发重连...");
+                OnLog("[断线检测] 连续 3 次读取失败，判定为断线，触发重连...");
+                // 先停掉当前 PollingReader（防止它继续报错）
+                var reader = _reader;
+                if (reader != null)
+                {
+                    reader.DataReceived -= OnDataReceived;
+                    reader.ErrorOccurred -= OnPollingError;
+                    try { reader.Stop(); } catch { }
+                    try { reader.Dispose(); } catch { }
+                    _reader = null;
+                }
                 TryReconnect();
             }
         }
