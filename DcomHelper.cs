@@ -225,6 +225,34 @@ namespace OpcDaClient
         }
 
         /// <summary>
+        /// 将远程 OPC 服务器的 ProgID → CLSID 注册到本地注册表
+        /// 解决 OPCAutomation.Connect 内部 CLSIDFromProgID 查不到的问题
+        /// </summary>
+        public static bool RegisterProgIdLocally(string progId, Guid clsid, Action<string> log = null)
+        {
+            try
+            {
+                // 写入 HKCU\Software\Classes（不需要管理员权限）
+                string keyPath = "Software\\Classes\\" + progId + "\\CLSID";
+                string clsidStr = "{" + clsid.ToString().ToUpper() + "}";
+
+                Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(keyPath);
+                if (key != null)
+                {
+                    key.SetValue("", clsidStr);
+                    key.Close();
+                    log?.Invoke("[注册] 本地注册 " + progId + " → " + clsidStr);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke("[注册] 写注册表失败: " + ex.Message);
+            }
+            return false;
+        }
+
+        /// <summary>
         /// 使用标准 DCOM 方式创建远程 COM 实例
         /// 等同于标准 OPC 测试工具的连接方式：
         /// CLSIDFromProgID → CoCreateInstanceEx(COSERVERINFO + COAUTHINFO)

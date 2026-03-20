@@ -55,16 +55,7 @@ namespace OpcDaClient
             ServerProgId = serverProgId;
             Host = host;
 
-            bool isRemote = !string.IsNullOrEmpty(host) &&
-                            host != "localhost" && host != "127.0.0.1";
-
-            if (isRemote)
-            {
-                Log("远程连接: " + host + " - 预热 DCOM 通道...");
-                WarmUpDcom(host, retryCount, retryDelayMs);
-            }
-
-            // 连接目标 OPC 服务器
+            // DCOM 预热由 DataForwarder 用 CLSID 完成，这里直接连接
             Exception lastEx = null;
 
             for (int attempt = 1; attempt <= retryCount; attempt++)

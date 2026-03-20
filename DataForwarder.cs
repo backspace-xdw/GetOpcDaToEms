@@ -78,9 +78,13 @@ namespace OpcDaClient
                 OnLog("[警告] 无法枚举远程服务器，直接尝试连接...");
             }
 
-            // 2. 用 OpcEnum 拿到的 CLSID 预热 DCOM 通道（无限重试直到通）
+            // 2. 用 OpcEnum 拿到的 CLSID：注册本地 + 预热 DCOM 通道
             if (serverClsid != Guid.Empty)
             {
+                // 注册 ProgID → CLSID 到本地注册表，让 OPCAutomation 查得到
+                DcomHelper.RegisterProgIdLocally(_config.ServerProgId, serverClsid,
+                    msg => OnLog(msg));
+
                 OnLog("使用 CLSID 预热 DCOM 通道...");
                 WarmUpWithClsid(serverClsid);
             }
