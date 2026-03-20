@@ -440,21 +440,28 @@ namespace OpcDaClient
         {
             OnLog("[轮询错误] " + e.Exception.Message + " (连续第 " + e.ConsecutiveErrors + " 次)");
 
-            // 连续 3 次错误就触发重连（不等到 PollingReader 的 10 次上限）
+            // 连续 3 次错误就触发重连
             if (e.ConsecutiveErrors >= 3)
             {
                 OnLog("[断线检测] 连续 3 次读取失败，判定为断线，触发重连...");
-                // 先停掉当前 PollingReader（防止它继续报错）
-                var reader = _reader;
-                if (reader != null)
+                // 在新线程中重连，避免在 PollingReader 线程上 Stop 自己导致死锁
+                var reconnectThread = new Thread(() =>
                 {
-                    reader.DataReceived -= OnDataReceived;
-                    reader.ErrorOccurred -= OnPollingError;
-                    try { reader.Stop(); } catch { }
-                    try { reader.Dispose(); } catch { }
-                    _reader = null;
-                }
-                TryReconnect();
+                    // 先停掉当前 PollingReader
+                    var reader = _reader;
+                    if (reader != null)
+                    {
+                        reader.DataReceived -= OnDataReceived;
+                        reader.ErrorOccurred -= OnPollingError;
+                        try { reader.Stop(); } catch { }
+                        try { reader.Dispose(); } catch { }
+                        _reader = null;
+                    }
+                    TryReconnect();
+                });
+                reconnectThread.IsBackground = true;
+                reconnectThread.Name = "OPC_Reconnect";
+                reconnectThread.Start();
             }
         }
 

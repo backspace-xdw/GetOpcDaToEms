@@ -113,16 +113,6 @@ namespace OpcDaClient
             throw new Exception("连接 OPC 服务器失败 (重试 " + retryCount + " 次): " + lastEx.Message, lastEx);
         }
 
-        /// <summary>
-        /// 使用标准 DCOM 方式预热（与 OPC 测试工具一致）
-        /// CoCreateInstanceEx + COSERVERINFO + COAUTHINFO
-        /// </summary>
-        private void WarmUpDcom(string host, int retryCount, int retryDelayMs)
-        {
-            DcomHelper.WarmUp(ServerProgId, host, retryCount, retryDelayMs,
-                msg => Log(msg));
-        }
-
         public void Reconnect(int retryCount = 5, int retryDelayMs = 3000)
         {
             IsConnected = false;
@@ -154,7 +144,7 @@ namespace OpcDaClient
         {
             EnsureConnected();
             var branches = new List<string>();
-            OPCBrowser browser = _opcServer.CreateBrowser();
+            dynamic browser = ((dynamic)_opcServer).CreateBrowser();
             browser.MoveToRoot();
             browser.ShowBranches();
             foreach (string branch in browser)
@@ -166,7 +156,7 @@ namespace OpcDaClient
         {
             EnsureConnected();
             var items = new List<OpcItem>();
-            OPCBrowser browser = _opcServer.CreateBrowser();
+            dynamic browser = ((dynamic)_opcServer).CreateBrowser();
             if (!string.IsNullOrEmpty(branch))
             {
                 browser.MoveToRoot();
@@ -177,7 +167,7 @@ namespace OpcDaClient
             {
                 items.Add(new OpcItem
                 {
-                    ItemId = browser.GetItemID(item),
+                    ItemId = (string)browser.GetItemID(item),
                     Name = item
                 });
             }
@@ -212,23 +202,17 @@ namespace OpcDaClient
         {
             try
             {
-                // 尝试访问服务器属性，能访问说明连接是通的
-                var state = _opcServer.ServerState;
+                dynamic server = _opcServer;
+                var state = server.ServerState;
                 return true;
             }
             catch { }
 
             try
             {
-                var name = _opcServer.ServerName;
+                dynamic server = _opcServer;
+                string name = server.ServerName;
                 return !string.IsNullOrEmpty(name);
-            }
-            catch { }
-
-            try
-            {
-                _opcServer.CreateBrowser();
-                return true;
             }
             catch { }
 

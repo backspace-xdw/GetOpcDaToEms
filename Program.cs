@@ -22,7 +22,7 @@ namespace OpcDaClient
                 {
                     try
                     {
-                        // 超过 5MB 轮转：当前 → .bak，重新开始
+                        // 超过 50KB 轮转：当前 → .bak，重新开始
                         var fi = new FileInfo(_logFile);
                         if (fi.Exists && fi.Length > MAX_LOG_SIZE)
                         {
