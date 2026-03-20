@@ -94,19 +94,6 @@ namespace OpcDaClient
                         }
                     }
 
-                    // 验证 OPCGroups 是否可用
-                    try
-                    {
-                        var groups = _opcServer.OPCGroups;
-                        Log("[连接] OPCGroups 验证通过");
-                    }
-                    catch (Exception groupEx)
-                    {
-                        // OPCGroups 类型转换失败，连接不完整
-                        Log("[连接] OPCGroups 不可用: " + groupEx.Message);
-                        throw new Exception("连接不完整，OPCGroups 不可用", groupEx);
-                    }
-
                     IsConnected = true;
                     Log("[连接成功]");
                     return;

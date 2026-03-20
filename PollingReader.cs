@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
-using OPCAutomation;
 
 namespace OpcDaClient
 {
@@ -34,24 +33,26 @@ namespace OpcDaClient
     }
 
     /// <summary>
-    /// 后台轮询读取器，支持同步/异步模式切换
+    /// 后台轮询读取器
+    /// 使用 dynamic 绕过 OPCAutomation 类型转换问题
     /// </summary>
     public class PollingReader : IPollingReader
     {
-        private readonly OPCServer _opcServer;
+        private readonly dynamic _opcServer;
         private readonly string[] _itemIds;
         private readonly ReadConfig _config;
         private volatile int _intervalMs;
 
-        private OPCGroup _group;
+        // 用 dynamic 避免 IOPCGroups / OPCGroup 类型转换错误
+        private dynamic _group;
         private string _groupName;
-        private Array _serverHandleArray;
+        private int[] _serverHandles;
 
         private Thread _pollingThread;
         private volatile bool _running;
         private readonly ManualResetEvent _stopSignal;
 
-        // 异步读取同步器
+        // 异步读取
         private ManualResetEvent _asyncReadDone;
         private Dictionary<string, OpcItemValue> _asyncReadResult;
         private Exception _asyncReadError;
@@ -67,7 +68,7 @@ namespace OpcDaClient
         public event EventHandler<PollingDataEventArgs> DataReceived;
         public event EventHandler<PollingErrorEventArgs> ErrorOccurred;
 
-        internal PollingReader(OPCServer opcServer, string[] itemIds, ReadConfig config, int intervalMs)
+        internal PollingReader(object opcServer, string[] itemIds, ReadConfig config, int intervalMs)
         {
             _opcServer = opcServer;
             _itemIds = (string[])itemIds.Clone();
@@ -114,33 +115,20 @@ namespace OpcDaClient
         {
             _groupName = "Polling_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-            if (_config.Mode == ReadMode.Sync)
-            {
-                // 同步模式：组不激活，避免 DAdvise 回调
-                _opcServer.OPCGroups.DefaultGroupIsActive = false;
-            }
-            else
-            {
-                // 异步模式：组需要激活
-                _opcServer.OPCGroups.DefaultGroupIsActive = true;
-            }
+            // 全部用 dynamic 调用，绕过 IOPCGroups 类型转换
+            dynamic groups = _opcServer.OPCGroups;
+            groups.DefaultGroupIsActive = false;
 
             try
             {
-                _group = _opcServer.OPCGroups.Add(_groupName);
+                _group = groups.Add(_groupName);
             }
             catch (Exception ex)
             {
                 if (ex.Message.Contains("RPC") || ex.Message.Contains("DAdvise"))
                 {
-                    try
-                    {
-                        _group = _opcServer.OPCGroups.GetOPCGroup(_groupName);
-                    }
-                    catch
-                    {
-                        throw new Exception("创建 OPC 组失败: " + ex.Message, ex);
-                    }
+                    try { _group = groups.GetOPCGroup(_groupName); }
+                    catch { throw new Exception("创建 OPC 组失败: " + ex.Message, ex); }
                 }
                 else
                 {
@@ -148,40 +136,32 @@ namespace OpcDaClient
                 }
             }
 
-            if (_config.Mode == ReadMode.Sync)
-            {
-                try { _group.IsActive = false; } catch { }
-            }
-            else
-            {
-                try { _group.IsActive = true; } catch { }
-            }
+            try { _group.IsActive = false; } catch { }
             try { _group.IsSubscribed = false; } catch { }
 
-            // 添加数据项并缓存 handle
-            var opcItems = _group.OPCItems;
-            var serverHandles = new int[_itemIds.Length];
+            // 添加数据项
+            dynamic opcItems = _group.OPCItems;
+            _serverHandles = new int[_itemIds.Length];
 
             for (int i = 0; i < _itemIds.Length; i++)
             {
-                var opcItem = opcItems.AddItem(_itemIds[i], i + 1);
-                serverHandles[i] = opcItem.ServerHandle;
-            }
-
-            _serverHandleArray = Array.CreateInstance(
-                typeof(int), new int[] { _itemIds.Length }, new int[] { 1 });
-            for (int i = 0; i < serverHandles.Length; i++)
-            {
-                _serverHandleArray.SetValue(serverHandles[i], i + 1);
+                dynamic opcItem = opcItems.AddItem(_itemIds[i], i + 1);
+                _serverHandles[i] = (int)opcItem.ServerHandle;
             }
 
             // 异步模式注册回调
             if (_config.Mode == ReadMode.Async)
             {
                 _asyncReadDone = new ManualResetEvent(false);
-                _group.AsyncReadComplete += OnAsyncReadComplete;
+                _group.AsyncReadComplete += new DynamicAsyncReadHandler(OnAsyncReadComplete);
             }
         }
+
+        // AsyncReadComplete 委托类型（dynamic 事件需要显式委托）
+        private delegate void DynamicAsyncReadHandler(
+            int transactionId, int numItems,
+            ref Array clientHandles, ref Array itemValues,
+            ref Array qualities, ref Array timeStamps, ref Array errors);
 
         private void CleanupGroup()
         {
@@ -190,14 +170,17 @@ namespace OpcDaClient
                 if (_group != null)
                 {
                     if (_config.Mode == ReadMode.Async)
-                        _group.AsyncReadComplete -= OnAsyncReadComplete;
-                    _opcServer.OPCGroups.Remove(_groupName);
+                    {
+                        try { _group.AsyncReadComplete -= new DynamicAsyncReadHandler(OnAsyncReadComplete); } catch { }
+                    }
+                    dynamic groups = _opcServer.OPCGroups;
+                    groups.Remove(_groupName);
                 }
             }
             catch { }
 
             _group = null;
-            _serverHandleArray = null;
+            _serverHandles = null;
 
             if (_asyncReadDone != null)
             {
@@ -264,26 +247,20 @@ namespace OpcDaClient
 
         private Dictionary<string, OpcItemValue> DoSyncRead()
         {
-            Array handleArray = (Array)_serverHandleArray.Clone();
+            // 构建 1-based handle 数组
+            Array handleArray = Array.CreateInstance(typeof(int), new int[] { _itemIds.Length }, new int[] { 1 });
+            for (int i = 0; i < _serverHandles.Length; i++)
+                handleArray.SetValue(_serverHandles[i], i + 1);
 
             Array values;
             Array errors;
             object qualities;
             object timeStamps;
 
-            // 同步模式组未激活，强制 Device；异步模式可用配置的 DataSource
-            short source = (_config.Mode == ReadMode.Sync)
-                ? (short)OpcDataSource.Device
-                : (short)_config.DataSource;
+            short source = (short)OpcDataSource.Device;
 
-            _group.SyncRead(
-                source,
-                _itemIds.Length,
-                ref handleArray,
-                out values,
-                out errors,
-                out qualities,
-                out timeStamps);
+            _group.SyncRead(source, _itemIds.Length, ref handleArray,
+                out values, out errors, out qualities, out timeStamps);
 
             return ParseResults(values, errors, qualities, timeStamps);
         }
@@ -298,23 +275,20 @@ namespace OpcDaClient
             _asyncReadError = null;
             _asyncReadDone.Reset();
 
-            Array handleArray = (Array)_serverHandleArray.Clone();
+            Array handleArray = Array.CreateInstance(typeof(int), new int[] { _itemIds.Length }, new int[] { 1 });
+            for (int i = 0; i < _serverHandles.Length; i++)
+                handleArray.SetValue(_serverHandles[i], i + 1);
+
             Array asyncErrors;
             int cancelId;
 
-            _group.AsyncRead(
-                _itemIds.Length,
-                ref handleArray,
-                out asyncErrors,
-                _readCount + 1,
-                out cancelId);
+            _group.AsyncRead(_itemIds.Length, ref handleArray, out asyncErrors, _readCount + 1, out cancelId);
 
             int timeout = _config.AsyncTimeoutMs > 0 ? _config.AsyncTimeoutMs : 5000;
             bool completed = _asyncReadDone.WaitOne(timeout);
 
             if (!completed)
                 throw new TimeoutException("异步读取超时 (" + timeout + "ms)");
-
             if (_asyncReadError != null)
                 throw _asyncReadError;
 
@@ -329,7 +303,6 @@ namespace OpcDaClient
             try
             {
                 var results = new Dictionary<string, OpcItemValue>();
-
                 for (int i = 1; i <= numItems; i++)
                 {
                     var clientHandle = (int)clientHandles.GetValue(i);
@@ -337,7 +310,6 @@ namespace OpcDaClient
                     {
                         var itemId = _itemIds[clientHandle - 1];
                         var errorCode = Convert.ToInt32(errors.GetValue(i));
-
                         results[itemId] = errorCode == 0
                             ? new OpcItemValue
                             {
@@ -353,7 +325,6 @@ namespace OpcDaClient
                             };
                     }
                 }
-
                 _asyncReadResult = results;
             }
             catch (Exception ex)
@@ -398,7 +369,6 @@ namespace OpcDaClient
                     };
                 }
             }
-
             return results;
         }
 
