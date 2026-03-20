@@ -81,16 +81,30 @@ namespace OpcDaClient
                     }
                     catch (Exception connectEx)
                     {
-                        // 第一次 Connect 可能因 IOPCShutdown 回调失败抛 E_FAIL
-                        // 但 DCOM 通道已建立，重新创建 OPCServer 再连一次
-                        Log("[连接] 首次 Connect 异常: " + connectEx.Message + "，DCOM 通道可能已建立，重试...");
+                        // Connect 可能因 IOPCShutdown 回调失败抛异常，
+                        // 但底层连接可能已建立（测试工具也忽略此错误）
+                        // 检查服务器是否实际可访问
+                        if (CheckServerAlive())
+                        {
+                            Log("[连接] 忽略异常（服务器可访问）: " + connectEx.Message);
+                        }
+                        else
+                        {
+                            throw;
+                        }
+                    }
 
-                        try { Marshal.FinalReleaseComObject(_opcServer); } catch { }
-                        _opcServer = new OPCServer();
-                        SetProxySecurity(_opcServer);
-
-                        _opcServer.Connect(serverProgId, host);
-                        Log("[连接] 重试 Connect 成功");
+                    // 验证 OPCGroups 是否可用
+                    try
+                    {
+                        var groups = _opcServer.OPCGroups;
+                        Log("[连接] OPCGroups 验证通过");
+                    }
+                    catch (Exception groupEx)
+                    {
+                        // OPCGroups 类型转换失败，连接不完整
+                        Log("[连接] OPCGroups 不可用: " + groupEx.Message);
+                        throw new Exception("连接不完整，OPCGroups 不可用", groupEx);
                     }
 
                     IsConnected = true;
