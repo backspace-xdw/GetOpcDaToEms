@@ -17,6 +17,9 @@ namespace OpcDaClient
         private IPollingReader _reader;
         private bool _disposed;
 
+        // 保持 DCOM 通道的 COM 对象（不释放，保持通道开放）
+        private object _dcomChannel;
+
         private Dictionary<string, PointMapping> _mappingDict;
 
         private int _totalForwarded;
@@ -96,6 +99,9 @@ namespace OpcDaClient
             _client.ConnectLog += (msg) => OnLog(msg);
 
             ConnectWithInfiniteRetry();
+
+            // 连接成功，释放 DCOM 通道保持对象
+            ReleaseDcomChannel();
 
             // 2. 确定点位列表
             if (_config.Points.Count > 0)
@@ -240,8 +246,9 @@ namespace OpcDaClient
                     object instance = DcomHelper.CreateRemoteInstanceByClsid(clsid, _config.Host);
                     if (instance != null)
                     {
-                        Marshal.FinalReleaseComObject(instance);
-                        OnLog("[DCOM] DCOM 通道已建立");
+                        // 不释放！保持 DCOM 通道开放，直到连接成功
+                        _dcomChannel = instance;
+                        OnLog("[DCOM] DCOM 通道已建立（保持开放）");
                         return;
                     }
                 }
@@ -344,12 +351,22 @@ namespace OpcDaClient
             }
         }
 
+        private void ReleaseDcomChannel()
+        {
+            if (_dcomChannel != null)
+            {
+                try { Marshal.FinalReleaseComObject(_dcomChannel); } catch { }
+                _dcomChannel = null;
+            }
+        }
+
         public void Stop()
         {
             if (!IsRunning) return;
 
             OnLog("----------------------------------------");
             OnLog("正在停止...");
+            ReleaseDcomChannel();
 
             if (_reader != null)
             {
