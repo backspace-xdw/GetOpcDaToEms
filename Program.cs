@@ -10,7 +10,7 @@ namespace OpcDaClient
     {
         private static string _logFile;
         private static readonly object _logLock = new object();
-        private const long MAX_LOG_SIZE = 5 * 1024 * 1024; // 5MB
+        private const long MAX_LOG_SIZE = 50 * 1024; // 50KB
 
         static void Log(string msg)
         {
