@@ -105,92 +105,13 @@ namespace OpcDaClient
         }
 
         /// <summary>
-        /// 多策略预热远程 DCOM 通道
+        /// 使用标准 DCOM 方式预热（与 OPC 测试工具一致）
+        /// CoCreateInstanceEx + COSERVERINFO + COAUTHINFO
         /// </summary>
         private void WarmUpDcom(string host, int retryCount, int retryDelayMs)
         {
-            // 策略1: 通过 OpcEnum ProgID
-            Log("[预热] 策略1: OPC.ServerList...");
-            if (TryWarmUp(() =>
-            {
-                Type t = Type.GetTypeFromProgID("OPC.ServerList.1", host, false);
-                if (t == null) t = Type.GetTypeFromProgID("OPC.ServerList", host, false);
-                if (t != null)
-                {
-                    object obj = Activator.CreateInstance(t);
-                    SetProxySecurity(obj);
-                    Marshal.FinalReleaseComObject(obj);
-                    return true;
-                }
-                return false;
-            }, retryCount, retryDelayMs))
-            {
-                Log("[预热] OpcEnum 通道已建立");
-                return;
-            }
-
-            // 策略2: 通过 OpcEnum CLSID (不依赖本地注册)
-            Log("[预热] 策略2: OpcEnum CLSID...");
-            if (TryWarmUp(() =>
-            {
-                Guid opcEnumClsid = new Guid("13486D51-4821-11D2-A494-3CB306C10000");
-                Type t = Type.GetTypeFromCLSID(opcEnumClsid, host, false);
-                if (t != null)
-                {
-                    object obj = Activator.CreateInstance(t);
-                    SetProxySecurity(obj);
-                    Marshal.FinalReleaseComObject(obj);
-                    return true;
-                }
-                return false;
-            }, retryCount, retryDelayMs))
-            {
-                Log("[预热] OpcEnum CLSID 通道已建立");
-                return;
-            }
-
-            // 策略3: 直接尝试创建目标 OPC 服务器的远程实例
-            Log("[预热] 策略3: 直接创建远程 " + ServerProgId + "...");
-            if (TryWarmUp(() =>
-            {
-                Type t = Type.GetTypeFromProgID(ServerProgId, host, false);
-                if (t != null)
-                {
-                    object obj = Activator.CreateInstance(t);
-                    SetProxySecurity(obj);
-                    Marshal.FinalReleaseComObject(obj);
-                    return true;
-                }
-                return false;
-            }, retryCount, retryDelayMs))
-            {
-                Log("[预热] 远程实例通道已建立");
-                return;
-            }
-
-            Log("[预热] 所有策略均未成功，继续尝试直接连接...");
-        }
-
-        private bool TryWarmUp(Func<bool> action, int retryCount, int retryDelayMs)
-        {
-            for (int i = 0; i < retryCount; i++)
-            {
-                try
-                {
-                    if (action())
-                        return true;
-                    Log("[预热]   Type 为 null，跳过");
-                    return false; // Type 为 null 说明不支持此策略
-                }
-                catch (Exception ex)
-                {
-                    Log("[预热]   第 " + (i + 1) + " 次: " + ex.Message);
-                }
-
-                if (i < retryCount - 1)
-                    Thread.Sleep(retryDelayMs);
-            }
-            return false;
+            DcomHelper.WarmUp(ServerProgId, host, retryCount, retryDelayMs,
+                msg => Log(msg));
         }
 
         public void Reconnect(int retryCount = 5, int retryDelayMs = 3000)
