@@ -3,6 +3,12 @@ using System.Collections.Generic;
 
 namespace OpcDaClient
 {
+    public enum ReadMode
+    {
+        Sync,
+        Async
+    }
+
     public enum OpcDataSource
     {
         Cache = 1,
@@ -11,7 +17,9 @@ namespace OpcDaClient
 
     public class ReadConfig
     {
+        public ReadMode Mode { get; set; } = ReadMode.Sync;
         public OpcDataSource DataSource { get; set; } = OpcDataSource.Cache;
+        public int AsyncTimeoutMs { get; set; } = 5000;
     }
 
     public interface IOpcDaClient : IDisposable

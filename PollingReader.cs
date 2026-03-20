@@ -34,7 +34,7 @@ namespace OpcDaClient
     }
 
     /// <summary>
-    /// 后台轮询读取器（纯同步，无任何异步操作）
+    /// 后台轮询读取器，支持同步/异步模式切换
     /// </summary>
     public class PollingReader : IPollingReader
     {
@@ -50,6 +50,11 @@ namespace OpcDaClient
         private Thread _pollingThread;
         private volatile bool _running;
         private readonly ManualResetEvent _stopSignal;
+
+        // 异步读取同步器
+        private ManualResetEvent _asyncReadDone;
+        private Dictionary<string, OpcItemValue> _asyncReadResult;
+        private Exception _asyncReadError;
 
         private int _readCount;
         private int _consecutiveErrors;
@@ -103,13 +108,22 @@ namespace OpcDaClient
             CleanupGroup();
         }
 
+        #region 初始化与清理
+
         private void InitGroup()
         {
             _groupName = "Polling_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-            // 关键：创建组之前设为不激活，避免触发 IDataObject::DAdvise 回调
-            // 对方服务器不支持回调会导致 RPC 不可用
-            _opcServer.OPCGroups.DefaultGroupIsActive = false;
+            if (_config.Mode == ReadMode.Sync)
+            {
+                // 同步模式：组不激活，避免 DAdvise 回调
+                _opcServer.OPCGroups.DefaultGroupIsActive = false;
+            }
+            else
+            {
+                // 异步模式：组需要激活
+                _opcServer.OPCGroups.DefaultGroupIsActive = true;
+            }
 
             try
             {
@@ -117,10 +131,8 @@ namespace OpcDaClient
             }
             catch (Exception ex)
             {
-                // 即使 DAdvise 报错，组可能已创建成功，尝试继续
                 if (ex.Message.Contains("RPC") || ex.Message.Contains("DAdvise"))
                 {
-                    // 尝试获取已创建的组
                     try
                     {
                         _group = _opcServer.OPCGroups.GetOPCGroup(_groupName);
@@ -136,10 +148,17 @@ namespace OpcDaClient
                 }
             }
 
-            // 确保不激活、不订阅（纯同步读取不需要）
-            try { _group.IsActive = false; } catch { }
+            if (_config.Mode == ReadMode.Sync)
+            {
+                try { _group.IsActive = false; } catch { }
+            }
+            else
+            {
+                try { _group.IsActive = true; } catch { }
+            }
             try { _group.IsSubscribed = false; } catch { }
 
+            // 添加数据项并缓存 handle
             var opcItems = _group.OPCItems;
             var serverHandles = new int[_itemIds.Length];
 
@@ -155,6 +174,13 @@ namespace OpcDaClient
             {
                 _serverHandleArray.SetValue(serverHandles[i], i + 1);
             }
+
+            // 异步模式注册回调
+            if (_config.Mode == ReadMode.Async)
+            {
+                _asyncReadDone = new ManualResetEvent(false);
+                _group.AsyncReadComplete += OnAsyncReadComplete;
+            }
         }
 
         private void CleanupGroup()
@@ -162,13 +188,27 @@ namespace OpcDaClient
             try
             {
                 if (_group != null)
+                {
+                    if (_config.Mode == ReadMode.Async)
+                        _group.AsyncReadComplete -= OnAsyncReadComplete;
                     _opcServer.OPCGroups.Remove(_groupName);
+                }
             }
             catch { }
 
             _group = null;
             _serverHandleArray = null;
+
+            if (_asyncReadDone != null)
+            {
+                _asyncReadDone.Dispose();
+                _asyncReadDone = null;
+            }
         }
+
+        #endregion
+
+        #region 轮询循环
 
         private void PollingLoop()
         {
@@ -177,9 +217,14 @@ namespace OpcDaClient
                 try
                 {
                     var sw = Stopwatch.StartNew();
-                    var results = DoSyncRead();
-                    sw.Stop();
 
+                    Dictionary<string, OpcItemValue> results;
+                    if (_config.Mode == ReadMode.Async)
+                        results = DoAsyncRead();
+                    else
+                        results = DoSyncRead();
+
+                    sw.Stop();
                     _readCount++;
                     _consecutiveErrors = 0;
 
@@ -213,6 +258,10 @@ namespace OpcDaClient
             }
         }
 
+        #endregion
+
+        #region 同步读取
+
         private Dictionary<string, OpcItemValue> DoSyncRead()
         {
             Array handleArray = (Array)_serverHandleArray.Clone();
@@ -222,9 +271,13 @@ namespace OpcDaClient
             object qualities;
             object timeStamps;
 
-            // 组未激活状态下 Cache 无数据，强制从 Device 读取
+            // 同步模式组未激活，强制 Device；异步模式可用配置的 DataSource
+            short source = (_config.Mode == ReadMode.Sync)
+                ? (short)OpcDataSource.Device
+                : (short)_config.DataSource;
+
             _group.SyncRead(
-                (short)OpcDataSource.Device,
+                source,
                 _itemIds.Length,
                 ref handleArray,
                 out values,
@@ -232,6 +285,94 @@ namespace OpcDaClient
                 out qualities,
                 out timeStamps);
 
+            return ParseResults(values, errors, qualities, timeStamps);
+        }
+
+        #endregion
+
+        #region 异步读取
+
+        private Dictionary<string, OpcItemValue> DoAsyncRead()
+        {
+            _asyncReadResult = null;
+            _asyncReadError = null;
+            _asyncReadDone.Reset();
+
+            Array handleArray = (Array)_serverHandleArray.Clone();
+            Array asyncErrors;
+            int cancelId;
+
+            _group.AsyncRead(
+                _itemIds.Length,
+                ref handleArray,
+                out asyncErrors,
+                _readCount + 1,
+                out cancelId);
+
+            int timeout = _config.AsyncTimeoutMs > 0 ? _config.AsyncTimeoutMs : 5000;
+            bool completed = _asyncReadDone.WaitOne(timeout);
+
+            if (!completed)
+                throw new TimeoutException("异步读取超时 (" + timeout + "ms)");
+
+            if (_asyncReadError != null)
+                throw _asyncReadError;
+
+            return _asyncReadResult ?? new Dictionary<string, OpcItemValue>();
+        }
+
+        private void OnAsyncReadComplete(
+            int transactionId, int numItems,
+            ref Array clientHandles, ref Array itemValues,
+            ref Array qualities, ref Array timeStamps, ref Array errors)
+        {
+            try
+            {
+                var results = new Dictionary<string, OpcItemValue>();
+
+                for (int i = 1; i <= numItems; i++)
+                {
+                    var clientHandle = (int)clientHandles.GetValue(i);
+                    if (clientHandle >= 1 && clientHandle <= _itemIds.Length)
+                    {
+                        var itemId = _itemIds[clientHandle - 1];
+                        var errorCode = Convert.ToInt32(errors.GetValue(i));
+
+                        results[itemId] = errorCode == 0
+                            ? new OpcItemValue
+                            {
+                                Value = itemValues.GetValue(i),
+                                Quality = ParseQuality(qualities, i),
+                                Timestamp = ParseTimestamp(timeStamps, i)
+                            }
+                            : new OpcItemValue
+                            {
+                                Value = null,
+                                Quality = OpcQuality.Bad,
+                                Timestamp = DateTime.Now
+                            };
+                    }
+                }
+
+                _asyncReadResult = results;
+            }
+            catch (Exception ex)
+            {
+                _asyncReadError = ex;
+            }
+            finally
+            {
+                _asyncReadDone.Set();
+            }
+        }
+
+        #endregion
+
+        #region 结果解析
+
+        private Dictionary<string, OpcItemValue> ParseResults(
+            Array values, Array errors, object qualities, object timeStamps)
+        {
             var results = new Dictionary<string, OpcItemValue>();
             var errorArray = (Array)errors;
 
@@ -287,6 +428,8 @@ namespace OpcDaClient
             catch { }
             return DateTime.Now;
         }
+
+        #endregion
 
         public void Dispose()
         {

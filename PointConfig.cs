@@ -24,7 +24,9 @@ namespace OpcDaClient
         public string Host { get; set; } = "192.168.1.100";
 
         public int PollingIntervalMs { get; set; } = 1000;
+        public ReadMode ReadMode { get; set; } = ReadMode.Sync;
         public OpcDataSource DataSource { get; set; } = OpcDataSource.Cache;
+        public int AsyncTimeoutMs { get; set; } = 5000;
 
         // 连接重试
         public int RetryCount { get; set; } = 5;
@@ -42,7 +44,12 @@ namespace OpcDaClient
 
         public ReadConfig GetReadConfig()
         {
-            return new ReadConfig { DataSource = DataSource };
+            return new ReadConfig
+            {
+                Mode = ReadMode,
+                DataSource = DataSource,
+                AsyncTimeoutMs = AsyncTimeoutMs
+            };
         }
     }
 
@@ -122,18 +129,40 @@ namespace OpcDaClient
                     if (int.TryParse(value, out interval))
                         config.PollingIntervalMs = interval;
                     break;
-                case "datasource":
                 case "readmode":
                     switch (value.ToLower())
                     {
-                        case "device":
+                        case "synccache":
+                            config.ReadMode = ReadMode.Sync;
+                            config.DataSource = OpcDataSource.Cache;
+                            break;
                         case "syncdevice":
+                            config.ReadMode = ReadMode.Sync;
                             config.DataSource = OpcDataSource.Device;
                             break;
+                        case "async":
+                        case "asyncdevice":
+                            config.ReadMode = ReadMode.Async;
+                            config.DataSource = OpcDataSource.Device;
+                            break;
+                        case "asynccache":
+                            config.ReadMode = ReadMode.Async;
+                            config.DataSource = OpcDataSource.Cache;
+                            break;
                         default:
+                            config.ReadMode = ReadMode.Sync;
                             config.DataSource = OpcDataSource.Cache;
                             break;
                     }
+                    break;
+                case "datasource":
+                    config.DataSource = value.ToLower() == "device"
+                        ? OpcDataSource.Device : OpcDataSource.Cache;
+                    break;
+                case "asynctimeoutms":
+                    int at;
+                    if (int.TryParse(value, out at))
+                        config.AsyncTimeoutMs = at;
                     break;
                 case "retrycount":
                     int rc;
@@ -176,7 +205,7 @@ namespace OpcDaClient
         public static void CreateDefaultConfig(string filePath)
         {
             File.WriteAllText(filePath,
-@"# OPC → EMS 数据转发配置（纯同步模式）
+@"# OPC → EMS 数据转发配置
 # 只需配置服务器信息，点位自动发现
 
 [Server]
@@ -185,8 +214,14 @@ HostName=192.168.1.100
 
 [Polling]
 IntervalMs=1000
-# 数据源: Cache(读缓存,快) / Device(读设备,保证最新)
-DataSource=Cache
+# 读取模式:
+#   SyncCache   = 同步读缓存（最快）
+#   SyncDevice  = 同步读设备（保证最新）
+#   AsyncDevice = 异步读设备（非阻塞）
+#   AsyncCache  = 异步读缓存
+ReadMode=SyncCache
+# 异步模式超时（毫秒）
+AsyncTimeoutMs=5000
 # 连接失败重试
 RetryCount=5
 RetryDelayMs=3000
