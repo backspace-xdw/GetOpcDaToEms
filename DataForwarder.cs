@@ -93,14 +93,8 @@ namespace OpcDaClient
                 WarmUpWithClsid(serverClsid);
             }
 
-            // 3. 连接 OPC 服务器（无限重试）
-            OnLog("连接 OPC: " + _config.ServerProgId + "@" + _config.Host);
-            _client = new OpcDaClient();
-            _client.ConnectLog += (msg) => OnLog(msg);
-
-            ConnectWithInfiniteRetry();
-
-            // DCOM 通道对象保持不释放，程序运行期间一直开放，断线重连时复用;
+            // DCOM 通道对象就是原生 IOPCServer，直接用于数据读取
+            OnLog("DCOM 通道已就绪，跳过 OPCAutomation 包装");
 
             // 2. 确定点位列表
             if (_config.Points.Count > 0)
@@ -172,12 +166,13 @@ namespace OpcDaClient
 
         private void StartPolling()
         {
-            var readConfig = _config.GetReadConfig();
             var opcItemIds = _config.GetOpcItemIds();
-
             OnLog("启动轮询: " + opcItemIds.Length + " 项, 间隔 " + _config.PollingIntervalMs + "ms");
 
-            _reader = _client.CreatePollingReader(opcItemIds, readConfig, _config.PollingIntervalMs);
+            // 使用 DCOM 通道的原生 COM 对象（IOPCServer），不经过 OPCAutomation
+            object serverObj = _dcomChannel;
+
+            _reader = new PollingReader(serverObj, opcItemIds, _config.GetReadConfig(), _config.PollingIntervalMs);
             _reader.DataReceived += OnDataReceived;
             _reader.ErrorOccurred += OnPollingError;
             _reader.Start();

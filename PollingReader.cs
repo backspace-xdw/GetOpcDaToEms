@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
-using OPCAutomation;
 
 namespace OpcDaClient
 {
@@ -35,21 +34,17 @@ namespace OpcDaClient
 
     /// <summary>
     /// 后台轮询读取器
-    /// 优先用 OPCAutomation 类型，类型转换失败则回退反射
+    /// 使用原生 OPC DA COM 接口（IOPCServer/IOPCSyncIO），不依赖 OPCAutomation
     /// </summary>
     public class PollingReader : IPollingReader
     {
-        private readonly object _opcServer;
+        private readonly object _serverObj;    // 原生 COM 对象（IOPCServer）
         private readonly string[] _itemIds;
-        private readonly ReadConfig _config;
         private volatile int _intervalMs;
 
-        private OPCGroup _typedGroup;   // OPCAutomation 类型（优先）
-        private object _rawGroup;       // 反射回退
-        private bool _useReflection;
-        private string _groupName;
+        private object _groupObj;              // IOPCGroupStateMgt / IOPCItemMgt / IOPCSyncIO
+        private int _serverGroupHandle;
         private int[] _serverHandles;
-        private Array _cachedHandleArray;
 
         private Thread _pollingThread;
         private volatile bool _running;
@@ -66,11 +61,10 @@ namespace OpcDaClient
         public event EventHandler<PollingDataEventArgs> DataReceived;
         public event EventHandler<PollingErrorEventArgs> ErrorOccurred;
 
-        internal PollingReader(object opcServer, string[] itemIds, ReadConfig config, int intervalMs)
+        internal PollingReader(object serverObj, string[] itemIds, ReadConfig config, int intervalMs)
         {
-            _opcServer = opcServer;
+            _serverObj = serverObj;
             _itemIds = (string[])itemIds.Clone();
-            _config = config ?? new ReadConfig();
             _intervalMs = intervalMs;
             _stopSignal = new ManualResetEvent(false);
         }
@@ -107,94 +101,24 @@ namespace OpcDaClient
             CleanupGroup();
         }
 
-        #region 初始化
-
         private void InitGroup()
         {
-            _groupName = "Polling_" + Guid.NewGuid().ToString("N").Substring(0, 8);
-            _useReflection = false;
+            string groupName = "Poll_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-            // 先尝试 OPCAutomation 类型
-            try
-            {
-                var server = (OPCServer)_opcServer;
-                var groups = server.OPCGroups;
-                _typedGroup = groups.Add(_groupName);
-                try { _typedGroup.IsActive = false; } catch { }
-                try { _typedGroup.IsSubscribed = false; } catch { }
+            // 原生接口：IOPCServer.AddGroup
+            RawOpcHelper.AddGroup(_serverObj, groupName, false, 1000,
+                out _serverGroupHandle, out _groupObj);
 
-                var opcItems = _typedGroup.OPCItems;
-                _serverHandles = new int[_itemIds.Length];
-                for (int i = 0; i < _itemIds.Length; i++)
-                {
-                    var opcItem = opcItems.AddItem(_itemIds[i], i + 1);
-                    _serverHandles[i] = opcItem.ServerHandle;
-                }
-
-                BuildHandleArray();
-                return;
-            }
-            catch (InvalidCastException)
-            {
-                // OPCAutomation 类型转换失败，回退反射
-                _useReflection = true;
-            }
-
-            // 回退：反射方式
-            InitGroupReflection();
-        }
-
-        private void InitGroupReflection()
-        {
-            object groups = Reflect.Get(_opcServer, "OPCGroups");
-            _rawGroup = Reflect.Call(groups, "Add", _groupName);
-            try { Reflect.Set(_rawGroup, "IsActive", false); } catch { }
-            try { Reflect.Set(_rawGroup, "IsSubscribed", false); } catch { }
-
-            object opcItems = Reflect.Get(_rawGroup, "OPCItems");
-            _serverHandles = new int[_itemIds.Length];
-            for (int i = 0; i < _itemIds.Length; i++)
-            {
-                object opcItem = Reflect.Call(opcItems, "AddItem", _itemIds[i], i + 1);
-                _serverHandles[i] = (int)Reflect.Get(opcItem, "ServerHandle");
-            }
-
-            BuildHandleArray();
-        }
-
-        private void BuildHandleArray()
-        {
-            _cachedHandleArray = Array.CreateInstance(
-                typeof(int), new int[] { _itemIds.Length }, new int[] { 1 });
-            for (int i = 0; i < _serverHandles.Length; i++)
-                _cachedHandleArray.SetValue(_serverHandles[i], i + 1);
+            // IOPCItemMgt.AddItems
+            _serverHandles = RawOpcHelper.AddItems(_groupObj, _itemIds);
         }
 
         private void CleanupGroup()
         {
-            try
-            {
-                if (_useReflection && _rawGroup != null)
-                {
-                    object groups = Reflect.Get(_opcServer, "OPCGroups");
-                    Reflect.Call(groups, "Remove", _groupName);
-                }
-                else if (_typedGroup != null)
-                {
-                    ((OPCServer)_opcServer).OPCGroups.Remove(_groupName);
-                }
-            }
-            catch { }
-
-            _typedGroup = null;
-            _rawGroup = null;
+            RawOpcHelper.RemoveGroup(_serverObj, _serverGroupHandle);
+            _groupObj = null;
             _serverHandles = null;
-            _cachedHandleArray = null;
         }
-
-        #endregion
-
-        #region 轮询循环
 
         private void PollingLoop()
         {
@@ -203,9 +127,12 @@ namespace OpcDaClient
                 try
                 {
                     var sw = Stopwatch.StartNew();
-                    var results = DoSyncRead();
-                    sw.Stop();
 
+                    // IOPCSyncIO.Read（从 Device 读取）
+                    var results = RawOpcHelper.SyncRead(
+                        _groupObj, _serverHandles, _itemIds, 2);
+
+                    sw.Stop();
                     _readCount++;
                     _consecutiveErrors = 0;
 
@@ -239,118 +166,6 @@ namespace OpcDaClient
             }
         }
 
-        #endregion
-
-        #region 同步读取
-
-        private Dictionary<string, OpcItemValue> DoSyncRead()
-        {
-            Array handleArray = (Array)_cachedHandleArray.Clone();
-
-            if (_useReflection)
-                return SyncReadReflection(handleArray);
-            else
-                return SyncReadTyped(handleArray);
-        }
-
-        private Dictionary<string, OpcItemValue> SyncReadTyped(Array handleArray)
-        {
-            Array values;
-            Array errors;
-            object qualities;
-            object timeStamps;
-
-            _typedGroup.SyncRead(
-                (short)OpcDataSource.Device,
-                _itemIds.Length,
-                ref handleArray,
-                out values,
-                out errors,
-                out qualities,
-                out timeStamps);
-
-            return ParseResults(values, errors, qualities, timeStamps);
-        }
-
-        private Dictionary<string, OpcItemValue> SyncReadReflection(Array handleArray)
-        {
-            object[] args = new object[]
-            {
-                (short)OpcDataSource.Device, _itemIds.Length,
-                handleArray, null, null, null, null
-            };
-
-            _rawGroup.GetType().InvokeMember("SyncRead",
-                System.Reflection.BindingFlags.InvokeMethod,
-                null, _rawGroup, args);
-
-            return ParseResults((Array)args[3], (Array)args[4], args[5], args[6]);
-        }
-
-        #endregion
-
-        #region 结果解析
-
-        private Dictionary<string, OpcItemValue> ParseResults(
-            Array values, Array errors, object qualities, object timeStamps)
-        {
-            var results = new Dictionary<string, OpcItemValue>();
-            var errorArray = (Array)errors;
-
-            for (int i = 0; i < _itemIds.Length; i++)
-            {
-                var errorCode = Convert.ToInt32(errorArray.GetValue(i + 1));
-                if (errorCode == 0)
-                {
-                    results[_itemIds[i]] = new OpcItemValue
-                    {
-                        Value = values.GetValue(i + 1),
-                        Quality = ParseQuality(qualities, i + 1),
-                        Timestamp = ParseTimestamp(timeStamps, i + 1)
-                    };
-                }
-                else
-                {
-                    results[_itemIds[i]] = new OpcItemValue
-                    {
-                        Value = null,
-                        Quality = OpcQuality.Bad,
-                        Timestamp = DateTime.Now
-                    };
-                }
-            }
-            return results;
-        }
-
-        private OpcQuality ParseQuality(object qualities, int index)
-        {
-            try
-            {
-                if (qualities != null)
-                {
-                    var raw = Convert.ToInt32(((Array)qualities).GetValue(index));
-                    var major = raw & 0xC0;
-                    if (Enum.IsDefined(typeof(OpcQuality), major))
-                        return (OpcQuality)major;
-                }
-            }
-            catch { }
-            return OpcQuality.Good;
-        }
-
-        private DateTime ParseTimestamp(object timeStamps, int index)
-        {
-            try
-            {
-                if (timeStamps != null)
-                    return (DateTime)((Array)timeStamps).GetValue(index);
-            }
-            catch { }
-            return DateTime.Now;
-        }
-
-        #endregion
-
         public void Dispose()
         {
             if (!_disposed)
@@ -358,30 +173,6 @@ namespace OpcDaClient
                 Stop();
                 _stopSignal.Dispose();
                 _disposed = true;
-            }
-        }
-
-        /// <summary>
-        /// 反射辅助（回退用，绕过 OPCAutomation COM 类型转换问题）
-        /// </summary>
-        private static class Reflect
-        {
-            public static object Get(object obj, string name)
-            {
-                return obj.GetType().InvokeMember(name,
-                    System.Reflection.BindingFlags.GetProperty, null, obj, null);
-            }
-
-            public static void Set(object obj, string name, object value)
-            {
-                obj.GetType().InvokeMember(name,
-                    System.Reflection.BindingFlags.SetProperty, null, obj, new object[] { value });
-            }
-
-            public static object Call(object obj, string name, params object[] args)
-            {
-                return obj.GetType().InvokeMember(name,
-                    System.Reflection.BindingFlags.InvokeMethod, null, obj, args);
             }
         }
     }
