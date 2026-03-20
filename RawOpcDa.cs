@@ -4,9 +4,39 @@ using System.Runtime.InteropServices;
 
 namespace OpcDaClient
 {
+    public enum ReadMode { Sync, Async }
+
+    public enum OpcDataSource { Cache = 1, Device = 2 }
+
+    public class ReadConfig
+    {
+        public ReadMode Mode { get; set; } = ReadMode.Sync;
+        public OpcDataSource DataSource { get; set; } = OpcDataSource.Cache;
+        public int AsyncTimeoutMs { get; set; } = 5000;
+    }
+
+    public class OpcItemValue
+    {
+        public object Value { get; set; }
+        public OpcQuality Quality { get; set; }
+        public DateTime Timestamp { get; set; }
+
+        public override string ToString()
+        {
+            return Value + " (" + Quality + ", " + Timestamp.ToString("HH:mm:ss.fff") + ")";
+        }
+    }
+
+    public enum OpcQuality
+    {
+        Bad = 0,
+        Uncertain = 64,
+        Good = 192,
+        GoodLocalOverride = 216
+    }
+
     /// <summary>
     /// 原生 OPC DA COM 接口定义（不依赖 OPCAutomation）
-    /// 与标准 OPC 测试工具使用完全相同的接口
     /// </summary>
 
     // IOPCServer {39c13a4d-011e-11d0-9675-0020afd8adb3}
