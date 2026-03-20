@@ -311,11 +311,15 @@ namespace OpcDaClient
         {
             int forwarded = 0;
             int errors = 0;
+            int skipped = 0;
 
             foreach (var kvp in e.Values)
             {
                 if (kvp.Value.Quality == OpcQuality.Bad || kvp.Value.Value == null)
+                {
+                    skipped++;
                     continue;
+                }
 
                 PointMapping mapping;
                 if (!_mappingDict.TryGetValue(kvp.Key, out mapping))
@@ -323,33 +327,50 @@ namespace OpcDaClient
 
                 try
                 {
+                    int ret = 0;
+                    float fVal = 0;
                     switch (mapping.DataType)
                     {
                         case EmsDataType.Ax:
-                            EmsPlus.WriteAnalog(mapping.EmsTagName,
-                                Convert.ToSingle(kvp.Value.Value));
+                            fVal = Convert.ToSingle(kvp.Value.Value);
+                            ret = EmsPlus.WriteAnalog(mapping.EmsTagName, fVal);
                             break;
                         case EmsDataType.Dx:
-                            EmsPlus.WriteDigital(mapping.EmsTagName,
-                                Convert.ToBoolean(kvp.Value.Value));
+                            bool bVal = Convert.ToBoolean(kvp.Value.Value);
+                            ret = EmsPlus.WriteDigital(mapping.EmsTagName, bVal);
                             break;
                         case EmsDataType.Cx:
-                            EmsPlus.WriteString(mapping.EmsTagName,
-                                Convert.ToString(kvp.Value.Value));
+                            string sVal = Convert.ToString(kvp.Value.Value);
+                            ret = EmsPlus.WriteString(mapping.EmsTagName, sVal);
                             break;
                     }
+
+                    // 每 10 次轮询打印一次详细值，平时只打印摘要
+                    if (e.ReadCount <= 3 || e.ReadCount % 10 == 0)
+                    {
+                        OnLog("  " + mapping.EmsTagName + " = " + kvp.Value.Value +
+                              " → EMS(ret=" + ret + ")");
+                    }
+
                     forwarded++;
                 }
-                catch { errors++; }
+                catch (Exception ex)
+                {
+                    errors++;
+                    if (errors <= 3)
+                        OnLog("  [EMS写入失败] " + mapping.EmsTagName + ": " + ex.Message);
+                }
             }
 
             _totalForwarded += forwarded;
             _totalErrors += errors;
 
             OnLog("[#" + e.ReadCount + " " + e.ReadTime.ToString("HH:mm:ss") + "] " +
-                  e.Values.Count + " 项 (" + e.ReadDurationMs + "ms) → " +
-                  forwarded + " 转发" +
-                  (errors > 0 ? ", " + errors + " 失败" : ""));
+                  "读取 " + e.Values.Count + " 项 (" + e.ReadDurationMs + "ms) → " +
+                  "EMS " + forwarded + " 成功" +
+                  (skipped > 0 ? ", " + skipped + " 质量差跳过" : "") +
+                  (errors > 0 ? ", " + errors + " 失败" : "") +
+                  " | 累计: " + _totalForwarded);
         }
 
         private void OnPollingError(object sender, PollingErrorEventArgs e)
