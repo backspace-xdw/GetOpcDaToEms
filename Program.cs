@@ -1,12 +1,30 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 namespace OpcDaClient
 {
     class Program
     {
+        private static string _logFile;
+        private static readonly object _logLock = new object();
+
+        static void Log(string msg)
+        {
+            string line = DateTime.Now.ToString("HH:mm:ss") + " " + msg;
+            Console.WriteLine(line);
+            if (_logFile != null)
+            {
+                lock (_logLock)
+                {
+                    try { File.AppendAllText(_logFile, line + "\r\n", Encoding.UTF8); }
+                    catch { }
+                }
+            }
+        }
+
         #region COM 安全初始化（关键：解决远程 DCOM 连接 RPC 不可用问题）
 
         [DllImport("ole32.dll")]
@@ -38,11 +56,15 @@ namespace OpcDaClient
         [STAThread]
         static void Main(string[] args)
         {
-            // 必须在创建任何 COM 对象之前调用
             InitComSecurity();
 
-            Console.WriteLine("OPC DA → EMS 数据转发");
-            Console.WriteLine("======================\n");
+            // 日志同时输出到控制台和文件
+            _logFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "opc_log.txt");
+            try { File.WriteAllText(_logFile, ""); } catch { _logFile = null; }
+
+            Log("OPC DA → EMS 数据转发");
+            Log("======================");
+            if (_logFile != null) Log("日志文件: " + _logFile);
 
             string configFile = ConfigLoader.DefaultConfigFile;
             for (int i = 0; i < args.Length; i++)
@@ -54,9 +76,9 @@ namespace OpcDaClient
 
             if (!File.Exists(configPath))
             {
-                Console.WriteLine("未找到配置文件，生成默认配置: " + configFile);
+                Log("未找到配置文件，生成默认配置: " + configFile);
                 ConfigLoader.CreateDefaultConfig(configPath);
-                Console.WriteLine("请编辑 " + configFile + " 填写 OPC 服务器信息后重新运行");
+                Log("请编辑 " + configFile + " 填写 OPC 服务器信息后重新运行");
                 Console.WriteLine("\n按任意键退出...");
                 Console.ReadKey();
                 return;
@@ -69,26 +91,22 @@ namespace OpcDaClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine("配置加载失败: " + ex.Message);
+                Log("配置加载失败: " + ex.Message);
                 Console.WriteLine("\n按任意键退出...");
                 Console.ReadKey();
                 return;
             }
 
-            Console.WriteLine("OPC: " + config.ServerProgId + "@" + config.Host);
-            Console.WriteLine("轮询: " + config.PollingIntervalMs + "ms");
+            Log("OPC: " + config.ServerProgId + "@" + config.Host);
+            Log("轮询: " + config.PollingIntervalMs + "ms");
             if (config.Points.Count > 0)
-                Console.WriteLine("点位: 配置文件指定 " + config.Points.Count + " 个");
+                Log("点位: 配置文件指定 " + config.Points.Count + " 个");
             else
-                Console.WriteLine("点位: 自动发现（浏览 OPC 服务器全部点位）");
-            Console.WriteLine();
+                Log("点位: 自动发现（浏览 OPC 服务器全部点位）");
 
             using (var forwarder = new DataForwarder(config))
             {
-                forwarder.Log += (s, e) =>
-                {
-                    Console.WriteLine(e.Time.ToString("HH:mm:ss") + " " + e.Message);
-                };
+                forwarder.Log += (s, e) => Log(e.Message);
 
                 try
                 {
