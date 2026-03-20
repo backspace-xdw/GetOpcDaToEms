@@ -38,13 +38,13 @@ namespace OpcDaClient
     /// </summary>
     public class PollingReader : IPollingReader
     {
-        private readonly dynamic _opcServer;
+        private readonly object _opcServer;
         private readonly string[] _itemIds;
         private readonly ReadConfig _config;
         private volatile int _intervalMs;
 
-        // 用 dynamic 避免 IOPCGroups / OPCGroup 类型转换错误
-        private dynamic _group;
+        // 用反射调用，避免 OPCAutomation COM 类型转换错误
+        private object _group;
         private string _groupName;
         private int[] _serverHandles;
 
@@ -115,17 +115,19 @@ namespace OpcDaClient
         {
             _groupName = "Polling_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-            dynamic groups = _opcServer.OPCGroups;
+            // 用反射调 OPCGroups.Add，绕过 dynamic 属性访问的类型问题
+            object groups = GetProperty(_opcServer, "OPCGroups");
 
+            object group = null;
             try
             {
-                _group = groups.Add(_groupName);
+                group = InvokeMethod(groups, "Add", new object[] { _groupName });
             }
             catch (Exception ex)
             {
                 if (ex.Message.Contains("RPC") || ex.Message.Contains("DAdvise"))
                 {
-                    try { _group = groups.GetOPCGroup(_groupName); }
+                    try { group = InvokeMethod(groups, "GetOPCGroup", new object[] { _groupName }); }
                     catch { throw new Exception("创建 OPC 组失败: " + ex.Message, ex); }
                 }
                 else
@@ -133,33 +135,39 @@ namespace OpcDaClient
                     throw;
                 }
             }
+            _group = group;
 
-            try { _group.IsActive = false; } catch { }
-            try { _group.IsSubscribed = false; } catch { }
+            try { SetProperty(_group, "IsActive", false); } catch { }
+            try { SetProperty(_group, "IsSubscribed", false); } catch { }
 
             // 添加数据项
-            dynamic opcItems = _group.OPCItems;
+            object opcItems = GetProperty(_group, "OPCItems");
             _serverHandles = new int[_itemIds.Length];
 
             for (int i = 0; i < _itemIds.Length; i++)
             {
-                dynamic opcItem = opcItems.AddItem(_itemIds[i], i + 1);
-                _serverHandles[i] = (int)opcItem.ServerHandle;
+                object opcItem = InvokeMethod(opcItems, "AddItem", new object[] { _itemIds[i], i + 1 });
+                _serverHandles[i] = (int)GetProperty(opcItem, "ServerHandle");
             }
 
             // 异步模式注册回调
             if (_config.Mode == ReadMode.Async)
             {
                 _asyncReadDone = new ManualResetEvent(false);
-                _group.AsyncReadComplete += new DynamicAsyncReadHandler(OnAsyncReadComplete);
+                // 异步事件通过反射注册
+                try
+                {
+                    var eventInfo = _group.GetType().GetEvent("AsyncReadComplete");
+                    if (eventInfo != null)
+                    {
+                        var handler = Delegate.CreateDelegate(eventInfo.EventHandlerType,
+                            this, "OnAsyncReadComplete");
+                        eventInfo.AddEventHandler(_group, handler);
+                    }
+                }
+                catch { }
             }
         }
-
-        // AsyncReadComplete 委托类型（dynamic 事件需要显式委托）
-        private delegate void DynamicAsyncReadHandler(
-            int transactionId, int numItems,
-            ref Array clientHandles, ref Array itemValues,
-            ref Array qualities, ref Array timeStamps, ref Array errors);
 
         private void CleanupGroup()
         {
@@ -169,10 +177,20 @@ namespace OpcDaClient
                 {
                     if (_config.Mode == ReadMode.Async)
                     {
-                        try { _group.AsyncReadComplete -= new DynamicAsyncReadHandler(OnAsyncReadComplete); } catch { }
+                        try
+                        {
+                            var eventInfo = _group.GetType().GetEvent("AsyncReadComplete");
+                            if (eventInfo != null)
+                            {
+                                var handler = Delegate.CreateDelegate(eventInfo.EventHandlerType,
+                                    this, "OnAsyncReadComplete");
+                                eventInfo.RemoveEventHandler(_group, handler);
+                            }
+                        }
+                        catch { }
                     }
-                    dynamic groups = _opcServer.OPCGroups;
-                    groups.Remove(_groupName);
+                    object groups = GetProperty(_opcServer, "OPCGroups");
+                    InvokeMethod(groups, "Remove", new object[] { _groupName });
                 }
             }
             catch { }
@@ -245,20 +263,21 @@ namespace OpcDaClient
 
         private Dictionary<string, OpcItemValue> DoSyncRead()
         {
-            // 构建 1-based handle 数组
             Array handleArray = Array.CreateInstance(typeof(int), new int[] { _itemIds.Length }, new int[] { 1 });
             for (int i = 0; i < _serverHandles.Length; i++)
                 handleArray.SetValue(_serverHandles[i], i + 1);
 
-            Array values;
-            Array errors;
-            object qualities;
-            object timeStamps;
-
             short source = (short)OpcDataSource.Device;
+            object[] args = new object[] { source, _itemIds.Length, handleArray, null, null, null, null };
 
-            _group.SyncRead(source, _itemIds.Length, ref handleArray,
-                out values, out errors, out qualities, out timeStamps);
+            _group.GetType().InvokeMember("SyncRead",
+                System.Reflection.BindingFlags.InvokeMethod,
+                null, _group, args);
+
+            Array values = (Array)args[3];
+            Array errors = (Array)args[4];
+            object qualities = args[5];
+            object timeStamps = args[6];
 
             return ParseResults(values, errors, qualities, timeStamps);
         }
@@ -277,10 +296,10 @@ namespace OpcDaClient
             for (int i = 0; i < _serverHandles.Length; i++)
                 handleArray.SetValue(_serverHandles[i], i + 1);
 
-            Array asyncErrors;
-            int cancelId;
-
-            _group.AsyncRead(_itemIds.Length, ref handleArray, out asyncErrors, _readCount + 1, out cancelId);
+            object[] args = new object[] { _itemIds.Length, handleArray, null, _readCount + 1, null };
+            _group.GetType().InvokeMember("AsyncRead",
+                System.Reflection.BindingFlags.InvokeMethod,
+                null, _group, args);
 
             int timeout = _config.AsyncTimeoutMs > 0 ? _config.AsyncTimeoutMs : 5000;
             bool completed = _asyncReadDone.WaitOne(timeout);
@@ -395,6 +414,28 @@ namespace OpcDaClient
             }
             catch { }
             return DateTime.Now;
+        }
+
+        #endregion
+
+        #region 反射辅助（绕过 OPCAutomation COM 类型转换问题）
+
+        private static object GetProperty(object obj, string name)
+        {
+            return obj.GetType().InvokeMember(name,
+                System.Reflection.BindingFlags.GetProperty, null, obj, null);
+        }
+
+        private static void SetProperty(object obj, string name, object value)
+        {
+            obj.GetType().InvokeMember(name,
+                System.Reflection.BindingFlags.SetProperty, null, obj, new object[] { value });
+        }
+
+        private static object InvokeMethod(object obj, string name, object[] args)
+        {
+            return obj.GetType().InvokeMember(name,
+                System.Reflection.BindingFlags.InvokeMethod, null, obj, args);
         }
 
         #endregion

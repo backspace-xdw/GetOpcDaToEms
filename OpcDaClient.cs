@@ -144,7 +144,7 @@ namespace OpcDaClient
         {
             EnsureConnected();
             var branches = new List<string>();
-            dynamic browser = ((dynamic)_opcServer).CreateBrowser();
+            OPCBrowser browser = _opcServer.CreateBrowser();
             browser.MoveToRoot();
             browser.ShowBranches();
             foreach (string branch in browser)
@@ -156,7 +156,7 @@ namespace OpcDaClient
         {
             EnsureConnected();
             var items = new List<OpcItem>();
-            dynamic browser = ((dynamic)_opcServer).CreateBrowser();
+            OPCBrowser browser = _opcServer.CreateBrowser();
             if (!string.IsNullOrEmpty(branch))
             {
                 browser.MoveToRoot();
@@ -167,7 +167,7 @@ namespace OpcDaClient
             {
                 items.Add(new OpcItem
                 {
-                    ItemId = (string)browser.GetItemID(item),
+                    ItemId = browser.GetItemID(item),
                     Name = item
                 });
             }
@@ -202,16 +202,14 @@ namespace OpcDaClient
         {
             try
             {
-                dynamic server = _opcServer;
-                var state = server.ServerState;
+                var state = _opcServer.ServerState;
                 return true;
             }
             catch { }
 
             try
             {
-                dynamic server = _opcServer;
-                string name = server.ServerName;
+                var name = _opcServer.ServerName;
                 return !string.IsNullOrEmpty(name);
             }
             catch { }
