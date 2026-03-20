@@ -115,9 +115,7 @@ namespace OpcDaClient
         {
             _groupName = "Polling_" + Guid.NewGuid().ToString("N").Substring(0, 8);
 
-            // 全部用 dynamic 调用，绕过 IOPCGroups 类型转换
             dynamic groups = _opcServer.OPCGroups;
-            groups.DefaultGroupIsActive = false;
 
             try
             {
