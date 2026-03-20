@@ -10,6 +10,7 @@ namespace OpcDaClient
     {
         private static string _logFile;
         private static readonly object _logLock = new object();
+        private const long MAX_LOG_SIZE = 5 * 1024 * 1024; // 5MB
 
         static void Log(string msg)
         {
@@ -19,7 +20,18 @@ namespace OpcDaClient
             {
                 lock (_logLock)
                 {
-                    try { File.AppendAllText(_logFile, line + "\r\n", Encoding.UTF8); }
+                    try
+                    {
+                        // 超过 5MB 轮转：当前 → .bak，重新开始
+                        var fi = new FileInfo(_logFile);
+                        if (fi.Exists && fi.Length > MAX_LOG_SIZE)
+                        {
+                            string bakFile = _logFile + ".bak";
+                            if (File.Exists(bakFile)) File.Delete(bakFile);
+                            File.Move(_logFile, bakFile);
+                        }
+                        File.AppendAllText(_logFile, line + "\r\n", Encoding.UTF8);
+                    }
                     catch { }
                 }
             }
