@@ -196,6 +196,28 @@ namespace OpcDaClient
     }
 
     /// <summary>
+    /// AddItems 结果：成功项的 ServerHandle 与每个项的错误码并列返回，
+    /// 调用方按 ErrorCodes[i] 是否为 0 判断该项是否添加成功。
+    /// </summary>
+    public class AddItemsResult
+    {
+        public int[] ServerHandles { get; set; }
+        public int[] ErrorCodes { get; set; }
+
+        public int SuccessCount
+        {
+            get
+            {
+                int n = 0;
+                if (ErrorCodes == null) return 0;
+                for (int i = 0; i < ErrorCodes.Length; i++)
+                    if (ErrorCodes[i] == 0) n++;
+                return n;
+            }
+        }
+    }
+
+    /// <summary>
     /// 原生 OPC DA 客户端助手
     /// 不依赖 OPCAutomation，直接使用 COM 接口
     /// </summary>
@@ -203,6 +225,27 @@ namespace OpcDaClient
     {
         private static readonly Guid IID_IOPCGroupStateMgt =
             new Guid("39c13a50-011e-11d0-9675-0020afd8adb3");
+
+        /// <summary>
+        /// 把 OPC 错误码翻译成可读字符串（包含常见标准错误与 DeltaV/Emerson 扩展）
+        /// </summary>
+        public static string FormatOpcError(int code)
+        {
+            string hex = "0x" + ((uint)code).ToString("X8");
+            string name;
+            switch ((uint)code)
+            {
+                case 0xC0040004: name = "OPC_E_BADTYPE (数据类型不匹配)"; break;
+                case 0xC0040006: name = "OPC_E_BADRIGHTS (无访问权限)"; break;
+                case 0xC0040007: name = "OPC_E_UNKNOWNITEMID (项不存在于地址空间)"; break;
+                case 0xC0040008: name = "OPC_E_INVALIDITEMID (项 ID 语法错误)"; break;
+                case 0xC004000B: name = "OPC_E_RANGE (值超出范围)"; break;
+                case 0xC004000C: name = "OPC_E_DUPLICATENAME (重名)"; break;
+                case 0xC004080C: name = "项暂时不可用 (Emerson 扩展, 地址空间未就绪/模块未下装)"; break;
+                default: name = "未知 OPC 错误"; break;
+            }
+            return hex + " " + name;
+        }
 
         /// <summary>
         /// 在远程 OPC 服务器上创建组
@@ -221,16 +264,21 @@ namespace OpcDaClient
         }
 
         /// <summary>
-        /// 向组中添加数据项
+        /// 向组中添加数据项。
+        /// 注意：AddItems 是 OPC 标准的"部分成功"接口 —— 整批 COM 调用成功后，
+        /// 仍可能有个别项失败。本方法不再对单项失败抛异常，而是返回每项的错误码，
+        /// 由调用方决定如何处理（典型做法：成功项立即投入轮询，失败项后台重试）。
+        /// 只有当 AddItems COM 调用本身失败（连接断、组无效等）时才会抛 COMException。
         /// </summary>
-        public static int[] AddItems(object groupObj, string[] itemIds)
+        public static AddItemsResult AddItems(object groupObj, string[] itemIds)
         {
             var itemMgt = (IOPCItemMgt)groupObj;
             int count = itemIds.Length;
 
-            // 构建 OPCITEMDEF 数组
             int defSize = Marshal.SizeOf(typeof(OPCITEMDEF));
             IntPtr pItems = Marshal.AllocCoTaskMem(defSize * count);
+            IntPtr ppResults = IntPtr.Zero;
+            IntPtr ppErrors = IntPtr.Zero;
 
             try
             {
@@ -250,44 +298,44 @@ namespace OpcDaClient
                     Marshal.StructureToPtr(itemDef, pItems + defSize * i, false);
                 }
 
-                IntPtr ppResults, ppErrors;
                 itemMgt.AddItems(count, pItems, out ppResults, out ppErrors);
 
-                // 解析 ServerHandle
                 int[] serverHandles = new int[count];
+                int[] errorCodes = new int[count];
                 int resultSize = Marshal.SizeOf(typeof(OPCITEMRESULT));
 
                 for (int i = 0; i < count; i++)
                 {
-                    var result = (OPCITEMRESULT)Marshal.PtrToStructure(
-                        ppResults + resultSize * i, typeof(OPCITEMRESULT));
-                    serverHandles[i] = result.hServer;
+                    errorCodes[i] = Marshal.ReadInt32(ppErrors + 4 * i);
 
-                    // 释放 Blob
-                    if (result.pBlob != IntPtr.Zero)
-                        Marshal.FreeCoTaskMem(result.pBlob);
+                    if (errorCodes[i] == 0)
+                    {
+                        var result = (OPCITEMRESULT)Marshal.PtrToStructure(
+                            ppResults + resultSize * i, typeof(OPCITEMRESULT));
+                        serverHandles[i] = result.hServer;
+
+                        if (result.pBlob != IntPtr.Zero)
+                            Marshal.FreeCoTaskMem(result.pBlob);
+                    }
+                    else
+                    {
+                        serverHandles[i] = 0;
+                    }
                 }
 
-                // 检查错误
-                for (int i = 0; i < count; i++)
+                return new AddItemsResult
                 {
-                    int error = Marshal.ReadInt32(ppErrors + 4 * i);
-                    if (error != 0)
-                        throw new Exception("添加项 '" + itemIds[i] + "' 失败: 0x" + error.ToString("X8"));
-                }
-
-                Marshal.FreeCoTaskMem(ppResults);
-                Marshal.FreeCoTaskMem(ppErrors);
-
-                return serverHandles;
+                    ServerHandles = serverHandles,
+                    ErrorCodes = errorCodes
+                };
             }
             finally
             {
-                // 清理 OPCITEMDEF 中的字符串
+                if (ppResults != IntPtr.Zero) Marshal.FreeCoTaskMem(ppResults);
+                if (ppErrors != IntPtr.Zero) Marshal.FreeCoTaskMem(ppErrors);
+
                 for (int i = 0; i < count; i++)
-                {
                     Marshal.DestroyStructure(pItems + defSize * i, typeof(OPCITEMDEF));
-                }
                 Marshal.FreeCoTaskMem(pItems);
             }
         }

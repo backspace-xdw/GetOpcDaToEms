@@ -128,14 +128,27 @@ namespace OpcDaClient
             OnLog("EMS ID: " + ok + " 成功, " + fail + " 失败");
 
             // 5. 启动轮询
-            StartPolling();
-
+            // 先把 IsRunning 置 true，外层 Main 循环依赖此值；首次启动失败时
+            // TryReconnect 也依赖 IsRunning=true 才会继续重试
             IsRunning = true;
             _totalForwarded = 0;
             _totalErrors = 0;
 
-            OnLog("转发运行中...");
-            OnLog("----------------------------------------");
+            try
+            {
+                StartPolling();
+                OnLog("转发运行中...");
+                OnLog("----------------------------------------");
+            }
+            catch (Exception ex)
+            {
+                OnLog("[启动] 首次启动轮询失败: " + ex.Message);
+                OnLog("[启动] 转入后台重连流程 (按 Enter 退出)");
+                var reconnectThread = new Thread(TryReconnect);
+                reconnectThread.IsBackground = true;
+                reconnectThread.Name = "OPC_Reconnect";
+                reconnectThread.Start();
+            }
         }
 
         /// <summary>
@@ -192,8 +205,16 @@ namespace OpcDaClient
             }
         }
 
+        private const int OpcServerWarmupMs = 5000;
+
         private void StartPolling()
         {
+            // 给 OPC Server 一点 warmup 时间：DCOM 通道建立后服务器内部 tag 数据库
+            // 可能还在构建/缓存，立刻 AddItems 容易拿到地址空间未就绪类错误
+            // （Emerson DeltaV 0xC004080C 就是典型）
+            OnLog("等待 OPC Server 内部初始化 (" + (OpcServerWarmupMs / 1000) + "s)...");
+            Thread.Sleep(OpcServerWarmupMs);
+
             var opcItemIds = _config.GetOpcItemIds();
             OnLog("启动轮询: " + opcItemIds.Length + " 项, 间隔 " + _config.PollingIntervalMs + "ms");
 

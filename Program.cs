@@ -10,11 +10,12 @@ namespace OpcDaClient
     {
         private static string _logFile;
         private static readonly object _logLock = new object();
-        private const long MAX_LOG_SIZE = 50 * 1024; // 50KB
+        private const long MAX_LOG_SIZE = 500 * 1024; // 500KB
+        private const int MAX_BACKUP_COUNT = 3;       // 保留 .bak.1 / .bak.2 / .bak.3
 
         static void Log(string msg)
         {
-            string line = DateTime.Now.ToString("HH:mm:ss") + " " + msg;
+            string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + msg;
             Console.WriteLine(line);
             if (_logFile != null)
             {
@@ -22,19 +23,36 @@ namespace OpcDaClient
                 {
                     try
                     {
-                        // 超过 50KB 轮转：当前 → .bak，重新开始
                         var fi = new FileInfo(_logFile);
                         if (fi.Exists && fi.Length > MAX_LOG_SIZE)
-                        {
-                            string bakFile = _logFile + ".bak";
-                            if (File.Exists(bakFile)) File.Delete(bakFile);
-                            File.Move(_logFile, bakFile);
-                        }
+                            RotateLog();
                         File.AppendAllText(_logFile, line + "\r\n", Encoding.UTF8);
                     }
                     catch { }
                 }
             }
+        }
+
+        /// <summary>
+        /// 日志轮转：删除最老的 .bak.N，其余依次后移，当前文件 → .bak.1
+        /// </summary>
+        private static void RotateLog()
+        {
+            try
+            {
+                string oldest = _logFile + ".bak." + MAX_BACKUP_COUNT;
+                if (File.Exists(oldest)) File.Delete(oldest);
+
+                for (int i = MAX_BACKUP_COUNT - 1; i >= 1; i--)
+                {
+                    string src = _logFile + ".bak." + i;
+                    string dst = _logFile + ".bak." + (i + 1);
+                    if (File.Exists(src)) File.Move(src, dst);
+                }
+
+                File.Move(_logFile, _logFile + ".bak.1");
+            }
+            catch { }
         }
 
         #region COM 安全初始化（关键：解决远程 DCOM 连接 RPC 不可用问题）
@@ -70,13 +88,15 @@ namespace OpcDaClient
         {
             InitComSecurity();
 
-            // 日志同时输出到控制台和文件
+            // 日志同时输出到控制台和文件（追加模式，不清空历史）
             _logFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "opc_log.txt");
-            try { File.WriteAllText(_logFile, ""); } catch { _logFile = null; }
+            // 仅探测写权限，失败则关闭文件日志；不清空已有日志
+            try { File.AppendAllText(_logFile, ""); } catch { _logFile = null; }
 
+            Log("");
             Log("OPC DA → EMS 数据转发");
             Log("======================");
-            if (_logFile != null) Log("日志文件: " + _logFile);
+            if (_logFile != null) Log("日志文件: " + _logFile + " (500KB 轮转, 保留 3 份)");
 
             string configFile = ConfigLoader.DefaultConfigFile;
             for (int i = 0; i < args.Length; i++)

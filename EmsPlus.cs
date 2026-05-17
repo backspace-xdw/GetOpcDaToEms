@@ -37,15 +37,14 @@ namespace OpcDaClient
         private static readonly Dictionary<string, int> _dxIdCache = new Dictionary<string, int>();
         private static readonly Dictionary<string, int> _cxIdCache = new Dictionary<string, int>();
 
+        // 只缓存有效 ID（>0），避免 EMS 暂时未就绪时缓存到 0/-1 后永远写入失败
         public static int GetAxId(string tagName, int srvNo = 0)
         {
             string key = srvNo + ":" + tagName;
             int id;
-            if (!_axIdCache.TryGetValue(key, out id))
-            {
-                id = GetAxIDVS(srvNo, tagName);
-                _axIdCache[key] = id;
-            }
+            if (_axIdCache.TryGetValue(key, out id)) return id;
+            id = GetAxIDVS(srvNo, tagName);
+            if (id > 0) _axIdCache[key] = id;
             return id;
         }
 
@@ -53,11 +52,9 @@ namespace OpcDaClient
         {
             string key = srvNo + ":" + tagName;
             int id;
-            if (!_dxIdCache.TryGetValue(key, out id))
-            {
-                id = GetDxIDVS(srvNo, tagName);
-                _dxIdCache[key] = id;
-            }
+            if (_dxIdCache.TryGetValue(key, out id)) return id;
+            id = GetDxIDVS(srvNo, tagName);
+            if (id > 0) _dxIdCache[key] = id;
             return id;
         }
 
@@ -65,11 +62,9 @@ namespace OpcDaClient
         {
             string key = srvNo + ":" + tagName;
             int id;
-            if (!_cxIdCache.TryGetValue(key, out id))
-            {
-                id = GetCxIDVS(srvNo, tagName);
-                _cxIdCache[key] = id;
-            }
+            if (_cxIdCache.TryGetValue(key, out id)) return id;
+            id = GetCxIDVS(srvNo, tagName);
+            if (id > 0) _cxIdCache[key] = id;
             return id;
         }
 
